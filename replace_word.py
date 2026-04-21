@@ -1,34 +1,55 @@
 from spire.doc import *
 from spire.doc.common import *
-from ai_generator import ai_generator
+
+from ai_generator import TAG_ALIASES, ai_generator
+
+
+KNOWN_LEVEL1_TAGS = [
+    "户外自主游戏回应性照护",
+    "室内自主游戏",
+    "户外自主游戏",
+    "户外体育游戏",
+    "生活活动",
+    "抱抱离园",
+    "餐前活动",
+    "餐后活动",
+    "加点能量",
+    "早操律动",
+    "主题活动",
+    "制作",
+    "香香进餐",
+    "午餐",
+    "起床",
+]
 
 def is_level1_para(para) -> str:
     """返回一级标签文本（保留★），如果匹配则返回，否则返回 None"""
     text = para.Text.strip()
-    known = ["室内自主游戏", "加点能量", "早操律动", "制作", "主题活动",
-             "户外体育游戏", "户外自主游戏", "起床", "户外自主游戏回应性照护",
-             "生活活动", "抱抱离园", "餐前活动", "午餐", "餐后活动"]
-    for lv in known:
-        if "★" + lv in text:
+    for lv in sorted(KNOWN_LEVEL1_TAGS, key=len, reverse=True):
+        if text.startswith("★" + lv):
             return "★" + lv
-        elif lv in text:
+        if text.startswith(lv):
             return lv
     return None
 
 def replace_in_paragraph(para, level1: str, new_secondary: str, new_blue: str):
-    """简化版：保留一级标签和紧跟的冒号，删除后面的内容，重新添加"""
+    """保留一级标签和冒号，删除其后旧内容，再追加新的二级标签和蓝色正文。"""
     full_text = para.Text
     
     if level1 not in full_text:
         return
     
-    # 找到一级标签结束位置
-    level1_end_pos = full_text.index(level1) + len(level1)
-    
-    # 找到需要删除的起始位置（跳过一级标签和紧跟的冒号）
+    label_end_pos = full_text.index(level1) + len(level1)
+    keep_end_pos = label_end_pos
+    while keep_end_pos < len(full_text) and full_text[keep_end_pos].isspace():
+        keep_end_pos += 1
+    if keep_end_pos < len(full_text) and full_text[keep_end_pos] in ["：", ":"]:
+        keep_end_pos += 1
+
+    delete_from = para.Items.Count
+    has_colon = keep_end_pos > label_end_pos and full_text[keep_end_pos - 1] in ["：", ":"]
     current_pos = 0
-    delete_from = -1
-    
+
     for i in range(para.Items.Count):
         item = para.Items.get_Item(i)
         if not hasattr(item, 'Text'):
@@ -37,70 +58,39 @@ def replace_in_paragraph(para, level1: str, new_secondary: str, new_blue: str):
         text = item.Text
         run_start = current_pos
         run_end = current_pos + len(text)
-        
-        # 如果这个run完全在一级标签之后
-        if run_start >= level1_end_pos:
-            # 检查是否是紧跟的冒号
-            if text.strip() in ["：", ":"]:
-                # 跳过冒号，从下一个run开始删除
-                if i + 1 < para.Items.Count:
-                    delete_from = i + 1
-                break
-            else:
-                # 不是冒号，从这个run开始删除
-                delete_from = i
-                break
-        
+
+        if run_end <= keep_end_pos:
+            current_pos = run_end
+            continue
+
+        if run_start < keep_end_pos < run_end:
+            item.Text = text[: keep_end_pos - run_start]
+            delete_from = i + 1
+            break
+
+        if run_start >= keep_end_pos:
+            delete_from = i
+            break
+
         current_pos = run_end
-    
-    # 检查一级标签后是否已有冒号
-    has_colon = False
-    if level1_end_pos < len(full_text):
-        next_char = full_text[level1_end_pos:level1_end_pos+1]
-        if next_char in ["：", ":"]:
-            has_colon = True
-    
-    # 如果没有找到需要删除的位置（说明只有一级标签，或一级标签+冒号）
-    if delete_from == -1:
-        # 添加冒号（如果没有）
-        if not has_colon:
-            text_range = para.AppendText("：")
-            text_range.CharacterFormat.FontName = "宋体"
-            text_range.CharacterFormat.FontSize = 10.5
-            text_range.CharacterFormat.TextColor = Color.get_Black()
-        
-        # 添加二级标签
-        text_range = para.AppendText(new_secondary + "。")
-        text_range.CharacterFormat.FontName = "宋体"
-        text_range.CharacterFormat.FontSize = 10.5
-        text_range.CharacterFormat.TextColor = Color.get_Black()
-        
-        # 添加蓝色正文
-        text_range = para.AppendText(new_blue)
-        text_range.CharacterFormat.FontName = "宋体"
-        text_range.CharacterFormat.FontSize = 10.5
-        text_range.CharacterFormat.TextColor = Color.get_Blue()
-        
-        return
-    
-    # 删除从delete_from开始的所有runs
+
     while para.Items.Count > delete_from:
         para.Items.RemoveAt(delete_from)
-    
-    # 添加冒号（如果没有）
+
+    new_secondary = new_secondary.strip().lstrip("：:").rstrip("。.")
+    new_blue = new_blue.strip().lstrip("。.")
+
     if not has_colon:
         text_range = para.AppendText("：")
         text_range.CharacterFormat.FontName = "宋体"
         text_range.CharacterFormat.FontSize = 10.5
         text_range.CharacterFormat.TextColor = Color.get_Black()
-    
-    # 添加二级标签
+
     text_range = para.AppendText(new_secondary + "。")
     text_range.CharacterFormat.FontName = "宋体"
     text_range.CharacterFormat.FontSize = 10.5
     text_range.CharacterFormat.TextColor = Color.get_Black()
-    
-    # 添加蓝色正文
+
     text_range = para.AppendText(new_blue)
     text_range.CharacterFormat.FontName = "宋体"
     text_range.CharacterFormat.FontSize = 10.5
@@ -110,14 +100,32 @@ def process_document(doc_path: str, ai_generator, max_count=None):
     doc = Document()
     doc.LoadFromFile(doc_path)
     
-    # 需要跳过的标签（只有1个）
-    skip_tags = ['香香进餐']
+    skip_tags = set()
     
     replaced_count = 0
     skipped_count = 0
 
     for sec_idx in range(doc.Sections.Count):
         sec = doc.Sections[sec_idx]
+
+        for p_idx in range(sec.Body.Paragraphs.Count):
+            p = sec.Body.Paragraphs[p_idx]
+            level1 = is_level1_para(p)
+            if level1:
+                clean_tag = TAG_ALIASES.get(level1.replace('★', ''), level1.replace('★', ''))
+                if clean_tag in skip_tags:
+                    skipped_count += 1
+                    print(f"跳过 {skipped_count}: {level1}")
+                    continue
+
+                new_sec, new_blue = ai_generator(level1)
+                replace_in_paragraph(p, level1, new_sec, new_blue)
+                replaced_count += 1
+                print(f"替换 {replaced_count}: {level1}")
+                if max_count and replaced_count >= max_count:
+                    break
+        if max_count and replaced_count >= max_count:
+            break
         
         for obj_idx in range(sec.Body.ChildObjects.Count):
             obj = sec.Body.ChildObjects[obj_idx]
@@ -131,8 +139,7 @@ def process_document(doc_path: str, ai_generator, max_count=None):
                             p = child.Body.Paragraphs[p_idx]
                             level1 = is_level1_para(p)
                             if level1:
-                                # 检查是否需要跳过
-                                clean_tag = level1.replace('★', '')
+                                clean_tag = TAG_ALIASES.get(level1.replace('★', ''), level1.replace('★', ''))
                                 if clean_tag in skip_tags:
                                     skipped_count += 1
                                     print(f"跳过 {skipped_count}: {level1}")
