@@ -24,6 +24,47 @@ FORBIDDEN_WORDS = ["开心", "快乐", "认真", "培养", "促进", "提高", "
 RECENT_SCENES = defaultdict(list)
 RECENT_NAME_GROUPS = []
 TAG_CALL_COUNT = defaultdict(int)
+USED_SECONDARY_BY_TAG = defaultdict(set)
+USED_SECONDARY_STEMS = set()
+USED_SECONDARY_SIGNATURES = defaultdict(set)
+USED_SECONDARY_SKELETONS = set()
+USED_SECONDARY_LEADS = set()
+
+SECONDARY_VARIANTS = [
+    "再放到前面",
+    "再看一看",
+    "再轻轻放下",
+    "再递给老师",
+    "再放回原位",
+    "再跟着做一下",
+    "再换一只手",
+    "再挪到旁边",
+    "再拿给同伴",
+    "再放进小盘里",
+    "再走回位置上",
+    "再等一等",
+]
+
+SECONDARY_INTROS = [""]
+for _lead_base in [
+    "听到老师提醒",
+    "轮到自己",
+    "走到前面",
+    "看着材料",
+    "坐稳以后",
+    "伸手过去",
+    "低头看看",
+    "把东西放好",
+    "跟着老师提示",
+    "自己试一试",
+    "转过身",
+    "看见同伴后",
+    "把小手放好",
+    "慢慢走近时",
+    "回到位置上",
+]:
+    for _lead_suffix in ["后，", "时，", "以后，"]:
+        SECONDARY_INTROS.append(f"{_lead_base}{_lead_suffix}")
 
 
 TAG_ALIASES = {
@@ -180,6 +221,8 @@ GENERATOR_CONFIG = {
             "{n2}说出“这是这个”。",
             "老师点点头又翻到下一张。",
             "{n3}跟着把{item1}放进{item2}里。",
+            "{n4}把卡片递给老师后又坐回位置上。",
+            "老师把图片排开，请大家一个个看。",
         ],
         "long_sentences": [
             "老师先拿出{item1}放在桌上。",
@@ -189,6 +232,8 @@ GENERATOR_CONFIG = {
             "{n3}把{item1}放进{item2}里后又拿出来看。",
             "{n4}坐在旁边跟着重复了一遍。",
             "老师把图片排开，让大家一个个看。",
+            "{n1}把手边的一张卡片翻过来又看了一眼。",
+            "{n2}把看到的图片递到老师手里。",
         ],
     },
     "户外体育游戏": {
@@ -279,6 +324,8 @@ GENERATOR_CONFIG = {
             "{n2}把{item1}推到一边。",
             "老师说“鞋子在这里”。",
             "{n1}低头把脚伸进去。",
+            "{n2}坐在床边看着老师帮旁边的小朋友。",
+            "{n1}站起来后把被角往里推了推。",
         ],
         "long_sentences": [
             "老师轻轻拍了拍{n1}说“该起床了”。",
@@ -288,6 +335,8 @@ GENERATOR_CONFIG = {
             "{n3}坐在床边看着老师帮旁边的小朋友。",
             "{n4}穿好一只后又弯腰去找另一只。",
             "{n1}站起来后把小被子往里面推了推。",
+            "{n2}把找到的一只鞋先放到脚边。",
+            "老师扶着{n3}站起来整理衣角。",
         ],
     },
     "生活活动": {
@@ -370,6 +419,8 @@ GENERATOR_CONFIG = {
             "{n2}看着老师手里的{item1}笑了笑。",
             "{n3}坐在旁边轻轻拍手。",
             "老师又说“做完就去吃饭”。",
+            "{n4}把手放在腿上等老师继续说。",
+            "{n2}抬头看着前面的老师没有离开位置。",
         ],
         "long_sentences": [
             "老师先说“我们坐下来做个手指游戏”。",
@@ -379,6 +430,8 @@ GENERATOR_CONFIG = {
             "老师说“做完我们就去洗手”。",
             "{n4}把手放到腿上后又抬起来继续做。",
             "{n1}看见旁边的小朋友做了，也跟着再做一遍。",
+            "{n2}停下来后抬头看着老师等下一步提醒。",
+            "{n3}做完一遍后把手轻轻放回腿上。",
         ],
     },
     "午餐": {
@@ -506,6 +559,54 @@ def _compose_text(sentences: list[str], min_len: int, max_len: int) -> str:
     return text[:max_len].rstrip("，。、")
 
 
+def _normalized_text(text: str) -> str:
+    text = re.sub(r"（[^）]*）", "", text)
+    return re.sub(r"[\W_]+", "", text)
+
+
+def _has_significant_overlap(secondary_tag: str, blue_text: str) -> bool:
+    sec_core = secondary_tag.split("：", 1)[-1]
+    sec_norm = _normalized_text(sec_core)
+    blue_norm = _normalized_text(blue_text)
+    if not sec_norm or not blue_norm:
+        return False
+    if sec_norm in blue_norm:
+        return True
+    max_size = min(len(sec_norm), 12)
+    for size in range(max_size, 7, -1):
+        for start in range(0, len(sec_norm) - size + 1):
+            chunk = sec_norm[start : start + size]
+            if chunk and chunk in blue_norm:
+                return True
+    return False
+
+
+def _select_sentences_without_overlap(
+    templates: list[str],
+    mapping: dict,
+    target_count: int,
+    rng: random.Random,
+    secondary_tag: str,
+) -> list[str]:
+    pool = templates[:]
+    rng.shuffle(pool)
+    selected = []
+    rejected = []
+    for template in pool:
+        sentence = template.format(**mapping)
+        if _has_significant_overlap(secondary_tag, sentence):
+            rejected.append(sentence)
+            continue
+        selected.append(sentence)
+        if len(selected) >= target_count:
+            return selected
+    for sentence in rejected:
+        selected.append(sentence)
+        if len(selected) >= target_count:
+            break
+    return selected
+
+
 def _sanitize_secondary(text: str) -> str:
     text = re.sub(r"\s+", "", text)
     text = text.lstrip("：:")
@@ -513,6 +614,37 @@ def _sanitize_secondary(text: str) -> str:
     for word in FORBIDDEN_WORDS:
         text = text.replace(word, "")
     return text
+
+
+def _secondary_stem(text: str) -> str:
+    return re.sub(r"（[^）]*）", "", _sanitize_secondary(text)).strip()
+
+
+def _known_items() -> list[str]:
+    return sorted(
+        {
+            item
+            for tag_config in GENERATOR_CONFIG.values()
+            for material in tag_config["materials"]
+            for item in material["items"]
+        },
+        key=len,
+        reverse=True,
+    )
+
+
+KNOWN_ITEMS = _known_items()
+
+
+def _secondary_skeleton(text: str) -> str:
+    skeleton = re.sub(r"（[^）]*）", "", _sanitize_secondary(text))
+    for item in KNOWN_ITEMS:
+        skeleton = skeleton.replace(item, "<ITEM>")
+    return re.sub(r"\s+", "", skeleton)
+
+
+def _secondary_lead_key(text: str) -> str:
+    return _secondary_skeleton(text)[:18]
 
 
 def _sanitize_blue(text: str, star: bool) -> str:
@@ -550,19 +682,76 @@ def generate_secondary_tag(level1: str) -> str:
     cfg = GENERATOR_CONFIG[clean_level1]
     rng = _rng_for(level1)
     material = _pick_material(cfg, rng, clean_level1)
-    prefix = rng.choice(cfg["secondary_prefixes"])
-    action = rng.choice(cfg["secondary_actions"]).format(
-        item1=material["items"][0],
-        item2=material["items"][-1],
+    prefixes = cfg["secondary_prefixes"][:]
+    rng.shuffle(prefixes)
+    action_templates = cfg["secondary_actions"][:]
+    rng.shuffle(action_templates)
+    variants = SECONDARY_VARIANTS[:]
+    rng.shuffle(variants)
+    intros = SECONDARY_INTROS[:]
+    rng.shuffle(intros)
+
+    def build_secondary(prefix: str, action_text: str) -> str:
+        if "：" in prefix:
+            text = f"{prefix}{action_text}（{material['label']}）"
+        else:
+            text = f"{prefix}：{action_text}（{material['label']}）"
+        return _sanitize_secondary(text)
+
+    for prefix in prefixes:
+        for action_template in action_templates:
+            base_action = action_template.format(
+                item1=material["items"][0],
+                item2=material["items"][-1],
+            )
+            for intro_index, intro in enumerate(intros):
+                action = f"{intro}{base_action}"
+                base_signature = f"{prefix}|{action_template}|intro:{intro_index}|base"
+                secondary = build_secondary(prefix, action)
+                stem = _secondary_stem(secondary)
+                if (
+                    secondary not in USED_SECONDARY_BY_TAG[clean_level1]
+                    and stem not in USED_SECONDARY_STEMS
+                    and base_signature not in USED_SECONDARY_SIGNATURES[clean_level1]
+                    and _secondary_skeleton(secondary) not in USED_SECONDARY_SKELETONS
+                    and _secondary_lead_key(secondary) not in USED_SECONDARY_LEADS
+                ):
+                    USED_SECONDARY_BY_TAG[clean_level1].add(secondary)
+                    USED_SECONDARY_STEMS.add(stem)
+                    USED_SECONDARY_SIGNATURES[clean_level1].add(base_signature)
+                    USED_SECONDARY_SKELETONS.add(_secondary_skeleton(secondary))
+                    USED_SECONDARY_LEADS.add(_secondary_lead_key(secondary))
+                    return secondary
+                for variant_index, variant in enumerate(variants):
+                    varied_action = f"{action}，{variant}"
+                    signature = f"{prefix}|{action_template}|intro:{intro_index}|variant:{variant_index}"
+                    secondary = build_secondary(prefix, varied_action)
+                    stem = _secondary_stem(secondary)
+                    if (
+                        secondary not in USED_SECONDARY_BY_TAG[clean_level1]
+                        and stem not in USED_SECONDARY_STEMS
+                        and signature not in USED_SECONDARY_SIGNATURES[clean_level1]
+                        and _secondary_skeleton(secondary) not in USED_SECONDARY_SKELETONS
+                        and _secondary_lead_key(secondary) not in USED_SECONDARY_LEADS
+                    ):
+                        USED_SECONDARY_BY_TAG[clean_level1].add(secondary)
+                        USED_SECONDARY_STEMS.add(stem)
+                        USED_SECONDARY_SIGNATURES[clean_level1].add(signature)
+                        USED_SECONDARY_SKELETONS.add(_secondary_skeleton(secondary))
+                        USED_SECONDARY_LEADS.add(_secondary_lead_key(secondary))
+                        return secondary
+
+    fallback_prefix = prefixes[0] if prefixes else "观察记录"
+    fallback = build_secondary(
+        fallback_prefix,
+        f"围着{material['items'][0]}和{material['items'][-1]}试一试，再换一种做法",
     )
-    if "：" in prefix:
-        secondary = f"{prefix}{action}（{material['label']}）"
-    elif prefix in {"教学", "阅读", "认识活动"}:
-        secondary = f"{prefix}：{action}（{material['label']}）"
-    else:
-        secondary = f"{prefix}：{action}（{material['label']}）"
-    secondary = _sanitize_secondary(secondary)
-    return secondary
+    USED_SECONDARY_BY_TAG[clean_level1].add(fallback)
+    USED_SECONDARY_STEMS.add(_secondary_stem(fallback))
+    USED_SECONDARY_SIGNATURES[clean_level1].add(f"{fallback_prefix}|fallback|{material['label']}")
+    USED_SECONDARY_SKELETONS.add(_secondary_skeleton(fallback))
+    USED_SECONDARY_LEADS.add(_secondary_lead_key(fallback))
+    return fallback
 
 
 def generate_blue_text(level1: str, secondary_tag: str) -> str:
@@ -583,7 +772,13 @@ def generate_blue_text(level1: str, secondary_tag: str) -> str:
         "item2": material["items"][-1],
     }
     if has_star:
-        sentences = _fill_templates(cfg["long_sentences"], mapping, 7, rng)
+        sentences = _select_sentences_without_overlap(
+            cfg["long_sentences"],
+            mapping,
+            7,
+            rng,
+            secondary_tag,
+        )
         text = _compose_text(sentences, 84, 102)
         if clean_level1 == "户外自主游戏":
             care = rng.choice(cfg["response_care"])
@@ -591,8 +786,30 @@ def generate_blue_text(level1: str, secondary_tag: str) -> str:
                 text += "。"
             text += care
     else:
-        sentences = _fill_templates(cfg["short_sentences"], mapping, 5, rng)
+        sentences = _select_sentences_without_overlap(
+            cfg["short_sentences"],
+            mapping,
+            5,
+            rng,
+            secondary_tag,
+        )
         text = _compose_text(sentences, 34, 48)
+    if _has_significant_overlap(secondary_tag, text):
+        fallback_templates = [
+            "{n1}看着老师点了点头。",
+            "{n2}把手里的东西放到旁边。",
+            "老师继续说“我们慢慢来”。",
+            "{n3}坐在旁边看着前面的动作。",
+            "{n4}做完后又看了看同伴。",
+        ]
+        fallback_sentences = _fill_templates(fallback_templates, mapping, 5, rng)
+        min_len, max_len = (84, 102) if has_star else (34, 48)
+        text = _compose_text(fallback_sentences + sentences, min_len, max_len)
+        if has_star and clean_level1 == "户外自主游戏" and "帮助婴幼儿" not in text:
+            care = rng.choice(cfg["response_care"])
+            if not text.endswith("。"):
+                text += "。"
+            text += care
     return _sanitize_blue(text, has_star)
 
 

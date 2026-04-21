@@ -11,12 +11,22 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from ai_generator import TAG_ALIASES, ai_generator
+from ai_generator import GENERATOR_CONFIG, TAG_ALIASES, ai_generator
 from replace_word import KNOWN_LEVEL1_TAGS, is_level1_para, process_document
 from spire.doc import Document
 
 
 KNOWN_TAGS = KNOWN_LEVEL1_TAGS[:]
+KNOWN_ITEMS = sorted(
+    {
+        item
+        for tag_config in GENERATOR_CONFIG.values()
+        for material in tag_config["materials"]
+        for item in material["items"]
+    },
+    key=len,
+    reverse=True,
+)
 
 
 def collect_activity_texts(doc_path: Path):
@@ -56,6 +66,35 @@ def count_labels(texts):
     return counts
 
 
+def normalized_text(text):
+    text = re.sub(r"（[^）]*）", "", text)
+    return re.sub(r"[\W_]+", "", text)
+
+
+def secondary_skeleton(text):
+    text = re.sub(r"（[^）]*）", "", text)
+    for item in KNOWN_ITEMS:
+        text = text.replace(item, "<ITEM>")
+    text = re.sub(r"\s+", "", text)
+    return text
+
+
+def has_significant_overlap(secondary, blue):
+    sec_core = secondary.split("：", 1)[-1]
+    sec_norm = normalized_text(sec_core)
+    blue_norm = normalized_text(blue)
+    if not sec_norm or not blue_norm:
+        return False
+    if sec_norm in blue_norm:
+        return True
+    max_size = min(len(sec_norm), 12)
+    for size in range(max_size, 7, -1):
+        for start in range(0, len(sec_norm) - size + 1):
+            if sec_norm[start : start + size] in blue_norm:
+                return True
+    return False
+
+
 def assert_output_quality(input_texts, output_texts, output_doc, log_text):
     if len(input_texts) != len(output_texts):
         raise AssertionError(
@@ -79,6 +118,11 @@ def assert_output_quality(input_texts, output_texts, output_doc, log_text):
     missing_colon = []
     too_short = []
     placeholders = []
+    repeated_pairs = []
+    duplicate_secondaries = {}
+    seen_secondary_stems = {}
+    duplicate_skeletons = {}
+    seen_skeletons = {}
 
     for text in output_texts:
         label = next((tag for tag in KNOWN_TAGS if f"★{tag}" in text or tag in text), None)
@@ -97,6 +141,23 @@ def assert_output_quality(input_texts, output_texts, output_doc, log_text):
         if "幼儿进行活动（材料）" in text or "幼儿在活动。" in text:
             placeholders.append(text[:80])
 
+        if "。" in suffix:
+            secondary_part, blue_part = suffix.lstrip("：:").split("。", 1)
+            secondary_stem = re.sub(r"（[^）]*）", "", secondary_part).strip()
+            if secondary_stem in seen_secondary_stems:
+                duplicate_secondaries.setdefault(secondary_stem, [seen_secondary_stems[secondary_stem]])
+                duplicate_secondaries[secondary_stem].append(text[:100])
+            else:
+                seen_secondary_stems[secondary_stem] = text[:100]
+            skeleton = secondary_skeleton(secondary_part)
+            if skeleton in seen_skeletons:
+                duplicate_skeletons.setdefault(skeleton, [seen_skeletons[skeleton]])
+                duplicate_skeletons[skeleton].append(text[:100])
+            else:
+                seen_skeletons[skeleton] = text[:100]
+            if has_significant_overlap(secondary_part, blue_part):
+                repeated_pairs.append(text[:100])
+
         if "★户外自主游戏" in text and "通过" in text and "帮助婴幼儿" in text:
             response_care_matches += 1
 
@@ -108,6 +169,21 @@ def assert_output_quality(input_texts, output_texts, output_doc, log_text):
 
     if placeholders:
         raise AssertionError(f"发现占位兜底文案未被替换：{placeholders[:3]}")
+
+    if repeated_pairs:
+        raise AssertionError(f"发现二级标签与蓝色正文重复：{repeated_pairs[:3]}")
+
+    if duplicate_secondaries:
+        sample_key = next(iter(duplicate_secondaries))
+        raise AssertionError(
+            f"发现跨周重复二级标签：{sample_key} -> {duplicate_secondaries[sample_key][:3]}"
+        )
+
+    if duplicate_skeletons:
+        sample_key = next(iter(duplicate_skeletons))
+        raise AssertionError(
+            f"发现跨周重复二级标签模板：{sample_key} -> {duplicate_skeletons[sample_key][:3]}"
+        )
 
     if response_care_matches == 0:
         raise AssertionError("未在任何 ★户外自主游戏 段落中检测到回应性照护文本。")
