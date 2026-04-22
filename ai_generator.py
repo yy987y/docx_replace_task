@@ -4,6 +4,13 @@ from collections import defaultdict
 import random
 import re
 
+from observation_templates import (
+    BLUE_PATTERNS,
+    BODY_PATTERN_PREFERENCES,
+    SECONDARY_LIBRARY,
+    SHORT_SECONDARY_PARTS,
+)
+
 
 NAMES = [
     "乐诚",
@@ -30,6 +37,7 @@ USED_SECONDARY_SIGNATURES = defaultdict(set)
 USED_SECONDARY_SKELETONS = defaultdict(int)
 USED_SECONDARY_LEADS = defaultdict(int)
 SECONDARY_STYLE_COUNTS = defaultdict(lambda: defaultdict(int))
+BODY_PATTERN_COUNTS = defaultdict(lambda: defaultdict(int))
 
 MAX_SECONDARY_STEM_REPEAT = 2
 MAX_SECONDARY_SKELETON_REPEAT = 2
@@ -312,7 +320,7 @@ GENERATOR_CONFIG = {
     },
     "起床": {
         "materials": [
-            {"label": "小床、鞋子", "items": ["小床", "鞋子"]},
+            {"label": "小被子、鞋子", "items": ["小被子", "鞋子"]},
             {"label": "被子、小袜子", "items": ["被子", "小袜子"]},
             {"label": "枕头、外套", "items": ["枕头", "外套"]},
         ],
@@ -540,6 +548,29 @@ def _pick_material(cfg: dict, rng: random.Random, tag: str) -> dict:
     return material
 
 
+def _pick_pattern(patterns: list[list[str]], key: str, rng: random.Random) -> list[str]:
+    indexed = list(enumerate(patterns))
+    indexed.sort(key=lambda item: BODY_PATTERN_COUNTS[key][item[0]])
+    lowest = BODY_PATTERN_COUNTS[key][indexed[0][0]]
+    candidates = [item for item in indexed if BODY_PATTERN_COUNTS[key][item[0]] == lowest]
+    rng.shuffle(candidates)
+    index, pattern = candidates[0]
+    BODY_PATTERN_COUNTS[key][index] += 1
+    return pattern
+
+
+def _pattern_orders_for_secondary(clean_level1: str, secondary_tag: str, mode: str, pattern_count: int) -> list[int]:
+    orders: list[int] = []
+    for rule in BODY_PATTERN_PREFERENCES.get(clean_level1, []):
+        if any(keyword in secondary_tag for keyword in rule["keywords"]):
+            orders.extend(index for index in rule.get(mode, []) if index < pattern_count)
+    deduped = []
+    for index in orders:
+        if index not in deduped:
+            deduped.append(index)
+    return deduped
+
+
 def _fill_templates(templates: list[str], mapping: dict, target_count: int, rng: random.Random) -> list[str]:
     pool = templates[:]
     rng.shuffle(pool)
@@ -659,7 +690,7 @@ def _sanitize_blue(text: str, star: bool) -> str:
     text = re.sub(r"[。]{2,}", "。", text)
     if not text.endswith("。"):
         text += "。"
-    max_len = 125 if star else 55
+    max_len = 140 if star else 68
     if len(text) > max_len:
         text = text[:max_len]
         last_period = text.rfind("。")
@@ -691,77 +722,54 @@ def generate_secondary_tag(level1: str) -> tuple[str, dict]:
     cfg = GENERATOR_CONFIG[clean_level1]
     rng = _rng_for(level1)
     material = _pick_material(cfg, rng, clean_level1)
-    prefixes = cfg["secondary_prefixes"][:]
-    rng.shuffle(prefixes)
-    action_templates = cfg["secondary_actions"][:]
-    rng.shuffle(action_templates)
-    extensions = SECONDARY_EXTENSIONS[:]
-    rng.shuffle(extensions)
-    intros = SECONDARY_INTROS[:]
-    rng.shuffle(intros)
-    style_templates = SECONDARY_STYLE_TEMPLATES[:]
-    rng.shuffle(style_templates)
-    style_templates.sort(key=lambda item: SECONDARY_STYLE_COUNTS[clean_level1][item[0]])
+    secondary_cfg = SHORT_SECONDARY_PARTS[clean_level1]
+    frames = secondary_cfg["frames"][:]
+    actions = secondary_cfg["actions"][:]
+    qualifiers = secondary_cfg["qualifiers"][:]
+    rng.shuffle(frames)
+    rng.shuffle(actions)
+    rng.shuffle(qualifiers)
 
-    def build_secondary(style_template: str, prefix: str, intro: str, action_text: str, extension: str) -> str:
-        if "：" in prefix or ":" in prefix:
-            prefix = prefix.rstrip("：:")
-        text = style_template.format(
-            prefix=prefix,
-            intro=intro,
-            action=action_text,
-            extension=extension,
+    def build_secondary(frame: str, action: str, qualifier: str) -> str:
+        text = frame.format(
+            action=action,
             material=material["label"],
+            item1=material["items"][0],
+            item2=material["items"][-1],
         )
-        return _sanitize_secondary(text)
+        text = _sanitize_secondary(text + qualifier)
+        return text
 
-    for style_name, style_template in style_templates:
-        for prefix in prefixes:
-            for action_template in action_templates:
-                base_action = action_template.format(
-                    item1=material["items"][0],
-                    item2=material["items"][-1],
-                )
-                for intro_index, intro in enumerate(intros):
-                    for extension_index, extension in enumerate(extensions):
-                        if style_name != "standard" and "材料" in intro:
-                            continue
-                        signature = (
-                            f"{style_name}|{prefix}|{action_template}|intro:{intro_index}|extension:{extension_index}"
-                        )
-                        secondary = build_secondary(style_template, prefix, intro, base_action, extension)
-                        stem = _secondary_stem(secondary)
-                        skeleton = _secondary_skeleton(secondary)
-                        lead_key = _secondary_lead_key(secondary)
-                        if (
-                            secondary not in USED_SECONDARY_BY_TAG[clean_level1]
-                            and USED_SECONDARY_STEMS[stem] < MAX_SECONDARY_STEM_REPEAT
-                            and signature not in USED_SECONDARY_SIGNATURES[clean_level1]
-                            and USED_SECONDARY_SKELETONS[skeleton] < MAX_SECONDARY_SKELETON_REPEAT
-                            and USED_SECONDARY_LEADS[lead_key] < MAX_SECONDARY_LEAD_REPEAT
-                        ):
-                            USED_SECONDARY_BY_TAG[clean_level1].add(secondary)
-                            USED_SECONDARY_STEMS[stem] += 1
-                            USED_SECONDARY_SIGNATURES[clean_level1].add(signature)
-                            USED_SECONDARY_SKELETONS[skeleton] += 1
-                            USED_SECONDARY_LEADS[lead_key] += 1
-                            SECONDARY_STYLE_COUNTS[clean_level1][style_name] += 1
-                            return secondary, material
+    for frame_index, frame in enumerate(frames):
+        for action_index, action in enumerate(actions):
+            for qualifier_index, qualifier in enumerate(qualifiers):
+                signature = f"frame:{frame_index}|action:{action_index}|qualifier:{qualifier_index}"
+                secondary = build_secondary(frame, action, qualifier)
+                if not secondary or len(secondary) > 24:
+                    continue
+                stem = _secondary_stem(secondary)
+                skeleton = _secondary_skeleton(secondary)
+                lead_key = _secondary_lead_key(secondary)
+                if (
+                    secondary not in USED_SECONDARY_BY_TAG[clean_level1]
+                    and USED_SECONDARY_STEMS[stem] < MAX_SECONDARY_STEM_REPEAT
+                    and signature not in USED_SECONDARY_SIGNATURES[clean_level1]
+                    and USED_SECONDARY_SKELETONS[skeleton] < MAX_SECONDARY_SKELETON_REPEAT
+                    and USED_SECONDARY_LEADS[lead_key] < MAX_SECONDARY_LEAD_REPEAT
+                ):
+                    USED_SECONDARY_BY_TAG[clean_level1].add(secondary)
+                    USED_SECONDARY_STEMS[stem] += 1
+                    USED_SECONDARY_SIGNATURES[clean_level1].add(signature)
+                    USED_SECONDARY_SKELETONS[skeleton] += 1
+                    USED_SECONDARY_LEADS[lead_key] += 1
+                    return secondary, material
 
-    fallback_prefix = prefixes[0] if prefixes else "观察记录"
-    fallback = build_secondary(
-        SECONDARY_STYLE_TEMPLATES[0][1],
-        fallback_prefix,
-        "",
-        f"围着{material['items'][0]}和{material['items'][-1]}试一试",
-        "，再换一种做法",
-    )
+    fallback = build_secondary(frames[0], actions[0], "")
     USED_SECONDARY_BY_TAG[clean_level1].add(fallback)
     USED_SECONDARY_STEMS[_secondary_stem(fallback)] += 1
-    USED_SECONDARY_SIGNATURES[clean_level1].add(f"{fallback_prefix}|fallback|{material['label']}")
+    USED_SECONDARY_SIGNATURES[clean_level1].add(f"{fallback}|fallback")
     USED_SECONDARY_SKELETONS[_secondary_skeleton(fallback)] += 1
     USED_SECONDARY_LEADS[_secondary_lead_key(fallback)] += 1
-    SECONDARY_STYLE_COUNTS[clean_level1][SECONDARY_STYLE_TEMPLATES[0][0]] += 1
     return fallback, material
 
 
@@ -783,46 +791,40 @@ def generate_blue_text(level1: str, secondary_tag: str, material: dict | None = 
         "item1": material["items"][0],
         "item2": material["items"][-1],
     }
-    if has_star:
-        sentences = _select_sentences_without_overlap(
-            cfg["long_sentences"],
-            mapping,
-            7,
-            rng,
-            secondary_tag,
-        )
-        text = _compose_text(sentences, 84, 102)
-        if clean_level1 == "户外自主游戏":
-            care = rng.choice(cfg["response_care"])
-            if not text.endswith("。"):
-                text += "。"
-            text += care
-    else:
-        sentences = _select_sentences_without_overlap(
-            cfg["short_sentences"],
-            mapping,
-            5,
-            rng,
-            secondary_tag,
-        )
-        text = _compose_text(sentences, 34, 48)
-    if _has_significant_overlap(secondary_tag, text):
-        fallback_templates = [
-            "{n1}看着老师点了点头。",
-            "{n2}把手里的东西放到旁边。",
-            "老师继续说“我们慢慢来”。",
-            "{n3}坐在旁边看着前面的动作。",
-            "{n4}做完后又看了看同伴。",
-        ]
-        fallback_sentences = _fill_templates(fallback_templates, mapping, 5, rng)
-        min_len, max_len = (84, 102) if has_star else (34, 48)
-        text = _compose_text(fallback_sentences + sentences, min_len, max_len)
-        if has_star and clean_level1 == "户外自主游戏" and "帮助婴幼儿" not in text:
-            care = rng.choice(cfg["response_care"])
-            if not text.endswith("。"):
-                text += "。"
-            text += care
-    return _sanitize_blue(text, has_star)
+    mode = "long" if has_star else "short"
+    pattern_key = f"{clean_level1}-{mode}"
+    patterns = BLUE_PATTERNS[clean_level1][mode]
+    text = ""
+    preferred_orders = _pattern_orders_for_secondary(clean_level1, secondary_tag, mode, len(patterns))
+
+    for pattern_index in preferred_orders:
+        pattern = patterns[pattern_index]
+        candidate = "".join(sentence.format(**mapping) for sentence in pattern)
+        if not _has_significant_overlap(secondary_tag, candidate):
+            text = candidate
+            break
+
+    if not text:
+        for _ in range(len(patterns)):
+            pattern = _pick_pattern(patterns, pattern_key, rng)
+            candidate = "".join(sentence.format(**mapping) for sentence in pattern)
+            if not _has_significant_overlap(secondary_tag, candidate):
+                text = candidate
+                break
+
+    if not text:
+        pattern = patterns[0]
+        text = "".join(sentence.format(**mapping) for sentence in pattern)
+
+    sanitized = _sanitize_blue(text, has_star)
+    if has_star and clean_level1 == "户外自主游戏":
+        care = rng.choice(cfg["response_care"])
+        if not sanitized.endswith("。"):
+            sanitized += "。"
+        sanitized += care
+        if not sanitized.endswith("。"):
+            sanitized += "。"
+    return sanitized
 
 
 def ai_generator(level1: str) -> tuple[str, str]:
@@ -830,6 +832,16 @@ def ai_generator(level1: str) -> tuple[str, str]:
     if clean_level1 not in GENERATOR_CONFIG:
         raise ValueError(f"不支持的一级标签: {level1}")
 
-    secondary, material = generate_secondary_tag(level1)
-    blue = generate_blue_text(level1, secondary, material)
-    return secondary, blue
+    fallback_secondary = None
+    fallback_blue = None
+
+    for _ in range(6):
+        secondary, material = generate_secondary_tag(level1)
+        blue = generate_blue_text(level1, secondary, material)
+        if fallback_secondary is None:
+            fallback_secondary = secondary
+            fallback_blue = blue
+        if not _has_significant_overlap(secondary, blue):
+            return secondary, blue
+
+    return fallback_secondary, fallback_blue
