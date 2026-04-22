@@ -7,6 +7,7 @@ import re
 from observation_templates import (
     BLUE_PATTERNS,
     BODY_PATTERN_PREFERENCES,
+    FOCUSED_BODY_LIBRARY,
     SECONDARY_LIBRARY,
     SHORT_SECONDARY_PARTS,
 )
@@ -717,12 +718,66 @@ def _extract_material_from_secondary(secondary_tag: str, cfg: dict) -> dict | No
     return None
 
 
+def _preferred_material_for_secondary(clean_level1: str, secondary_tag: str, cfg: dict, fallback: dict) -> dict:
+    if clean_level1 != "生活活动":
+        return fallback
+
+    preferred_label = None
+    if any(keyword in secondary_tag for keyword in ["接水", "喝水", "小杯子"]):
+        preferred_label = "小杯子、纸巾"
+    elif any(keyword in secondary_tag for keyword in ["水杯", "杯架"]):
+        preferred_label = "毛巾、水杯"
+    elif any(keyword in secondary_tag for keyword in ["热水", "洗手", "洗手液"]):
+        preferred_label = "洗手液、毛巾"
+    elif any(keyword in secondary_tag for keyword in ["毛巾", "手心", "手背", "擦汗", "额头", "脸"]):
+        preferred_label = "毛巾、水杯"
+    elif any(keyword in secondary_tag for keyword in ["纸巾", "嘴", "垃圾桶"]):
+        preferred_label = "纸巾"
+
+    if not preferred_label:
+        return fallback
+
+    for material in cfg["materials"]:
+        if material["label"] == preferred_label:
+            return material
+    return fallback
+
+
 def generate_secondary_tag(level1: str) -> tuple[str, dict]:
     clean_level1 = _clean_tag(level1)
     cfg = GENERATOR_CONFIG[clean_level1]
     rng = _rng_for(level1)
     material = _pick_material(cfg, rng, clean_level1)
     secondary_cfg = SHORT_SECONDARY_PARTS[clean_level1]
+    if secondary_cfg.get("templates"):
+        templates = secondary_cfg["templates"][:]
+        rng.shuffle(templates)
+        for template in templates:
+            secondary = _sanitize_secondary(
+                template.format(
+                    material=material["label"],
+                    item1=material["items"][0],
+                    item2=material["items"][-1],
+                )
+            )
+            if not secondary or len(secondary) > 24:
+                continue
+            stem = _secondary_stem(secondary)
+            skeleton = _secondary_skeleton(secondary)
+            lead_key = _secondary_lead_key(secondary)
+            if (
+                secondary not in USED_SECONDARY_BY_TAG[clean_level1]
+                and USED_SECONDARY_STEMS[stem] < MAX_SECONDARY_STEM_REPEAT
+                and USED_SECONDARY_SKELETONS[skeleton] < MAX_SECONDARY_SKELETON_REPEAT
+                and USED_SECONDARY_LEADS[lead_key] < MAX_SECONDARY_LEAD_REPEAT
+            ):
+                material = _preferred_material_for_secondary(clean_level1, secondary, cfg, material)
+                USED_SECONDARY_BY_TAG[clean_level1].add(secondary)
+                USED_SECONDARY_STEMS[stem] += 1
+                USED_SECONDARY_SKELETONS[skeleton] += 1
+                USED_SECONDARY_LEADS[lead_key] += 1
+                return secondary, material
+
     frames = secondary_cfg["frames"][:]
     actions = secondary_cfg["actions"][:]
     qualifiers = secondary_cfg["qualifiers"][:]
@@ -731,8 +786,13 @@ def generate_secondary_tag(level1: str) -> tuple[str, dict]:
     rng.shuffle(qualifiers)
 
     def build_secondary(frame: str, action: str, qualifier: str) -> str:
+        action_text = action.format(
+            material=material["label"],
+            item1=material["items"][0],
+            item2=material["items"][-1],
+        )
         text = frame.format(
-            action=action,
+            action=action_text,
             material=material["label"],
             item1=material["items"][0],
             item2=material["items"][-1],
@@ -757,6 +817,7 @@ def generate_secondary_tag(level1: str) -> tuple[str, dict]:
                     and USED_SECONDARY_SKELETONS[skeleton] < MAX_SECONDARY_SKELETON_REPEAT
                     and USED_SECONDARY_LEADS[lead_key] < MAX_SECONDARY_LEAD_REPEAT
                 ):
+                    material = _preferred_material_for_secondary(clean_level1, secondary, cfg, material)
                     USED_SECONDARY_BY_TAG[clean_level1].add(secondary)
                     USED_SECONDARY_STEMS[stem] += 1
                     USED_SECONDARY_SIGNATURES[clean_level1].add(signature)
@@ -765,12 +826,32 @@ def generate_secondary_tag(level1: str) -> tuple[str, dict]:
                     return secondary, material
 
     fallback = build_secondary(frames[0], actions[0], "")
+    material = _preferred_material_for_secondary(clean_level1, fallback, cfg, material)
     USED_SECONDARY_BY_TAG[clean_level1].add(fallback)
     USED_SECONDARY_STEMS[_secondary_stem(fallback)] += 1
     USED_SECONDARY_SIGNATURES[clean_level1].add(f"{fallback}|fallback")
     USED_SECONDARY_SKELETONS[_secondary_skeleton(fallback)] += 1
     USED_SECONDARY_LEADS[_secondary_lead_key(fallback)] += 1
     return fallback, material
+
+
+def _focused_body_candidates(clean_level1: str, secondary_tag: str, mode: str) -> list[list[str]]:
+    matched_rules = []
+    for rule in FOCUSED_BODY_LIBRARY.get(clean_level1, []):
+        matched_count = sum(1 for keyword in rule["keywords"] if keyword in secondary_tag)
+        if matched_count:
+            matched_rules.append((rule.get("priority", 0), matched_count, rule))
+
+    if not matched_rules:
+        return []
+
+    matched_rules.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    best_priority, best_count, _ = matched_rules[0]
+    candidates: list[list[str]] = []
+    for priority, count, rule in matched_rules:
+        if priority == best_priority and count == best_count:
+            candidates.extend(rule.get(mode, []))
+    return candidates
 
 
 def generate_blue_text(level1: str, secondary_tag: str, material: dict | None = None) -> str:
@@ -795,14 +876,21 @@ def generate_blue_text(level1: str, secondary_tag: str, material: dict | None = 
     pattern_key = f"{clean_level1}-{mode}"
     patterns = BLUE_PATTERNS[clean_level1][mode]
     text = ""
+    focused_patterns = _focused_body_candidates(clean_level1, secondary_tag, mode)
+    if focused_patterns:
+        focused_key = f"{pattern_key}-focused"
+        pattern = _pick_pattern(focused_patterns, focused_key, rng)
+        text = "".join(sentence.format(**mapping) for sentence in pattern)
+
     preferred_orders = _pattern_orders_for_secondary(clean_level1, secondary_tag, mode, len(patterns))
 
-    for pattern_index in preferred_orders:
-        pattern = patterns[pattern_index]
-        candidate = "".join(sentence.format(**mapping) for sentence in pattern)
-        if not _has_significant_overlap(secondary_tag, candidate):
-            text = candidate
-            break
+    if not text:
+        for pattern_index in preferred_orders:
+            pattern = patterns[pattern_index]
+            candidate = "".join(sentence.format(**mapping) for sentence in pattern)
+            if not _has_significant_overlap(secondary_tag, candidate):
+                text = candidate
+                break
 
     if not text:
         for _ in range(len(patterns)):
