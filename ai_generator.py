@@ -25,46 +25,51 @@ RECENT_SCENES = defaultdict(list)
 RECENT_NAME_GROUPS = []
 TAG_CALL_COUNT = defaultdict(int)
 USED_SECONDARY_BY_TAG = defaultdict(set)
-USED_SECONDARY_STEMS = set()
+USED_SECONDARY_STEMS = defaultdict(int)
 USED_SECONDARY_SIGNATURES = defaultdict(set)
-USED_SECONDARY_SKELETONS = set()
-USED_SECONDARY_LEADS = set()
+USED_SECONDARY_SKELETONS = defaultdict(int)
+USED_SECONDARY_LEADS = defaultdict(int)
+SECONDARY_STYLE_COUNTS = defaultdict(lambda: defaultdict(int))
 
-SECONDARY_VARIANTS = [
-    "再放到前面",
-    "再看一看",
-    "再轻轻放下",
-    "再递给老师",
-    "再放回原位",
-    "再跟着做一下",
-    "再换一只手",
-    "再挪到旁边",
-    "再拿给同伴",
-    "再放进小盘里",
-    "再走回位置上",
-    "再等一等",
+MAX_SECONDARY_STEM_REPEAT = 2
+MAX_SECONDARY_SKELETON_REPEAT = 2
+MAX_SECONDARY_LEAD_REPEAT = 2
+
+SECONDARY_EXTENSIONS = [
+    "",
+    "，再看看同伴的做法",
+    "，再按顺序做下一步",
+    "，再换一种方式试试",
+    "，再听提示做后面的动作",
+    "，再继续完成接下来的动作",
 ]
 
-SECONDARY_INTROS = [""]
-for _lead_base in [
-    "听到老师提醒",
-    "轮到自己",
-    "走到前面",
-    "看着材料",
-    "坐稳以后",
-    "伸手过去",
-    "低头看看",
-    "把东西放好",
-    "跟着老师提示",
-    "自己试一试",
-    "转过身",
-    "看见同伴后",
-    "把小手放好",
-    "慢慢走近时",
-    "回到位置上",
-]:
-    for _lead_suffix in ["后，", "时，", "以后，"]:
-        SECONDARY_INTROS.append(f"{_lead_base}{_lead_suffix}")
+SECONDARY_INTROS = [
+    "",
+    "听到老师提醒后，",
+    "轮到自己时，",
+    "走到前面后，",
+    "看着材料时，",
+    "坐稳以后，",
+    "伸手过去时，",
+    "低头看看后，",
+    "把东西放好后，",
+    "跟着老师提示时，",
+    "自己试一试时，",
+    "转过身后，",
+    "看见同伴后，",
+    "把小手放好后，",
+    "慢慢走近时，",
+    "回到位置上后，",
+]
+
+SECONDARY_STYLE_TEMPLATES = [
+    ("standard", "{prefix}：{intro}{action}{extension}"),
+    ("around_material", "{prefix}：围绕{material}，{intro}{action}{extension}"),
+    ("with_material", "{prefix}：结合{material}时，{intro}{action}{extension}"),
+    ("process_material", "{prefix}：在接触{material}的过程中，{intro}{action}{extension}"),
+    ("continue_try", "{prefix}：借助{material}继续尝试，{intro}{action}{extension}"),
+]
 
 
 TAG_ALIASES = {
@@ -665,19 +670,23 @@ def _sanitize_blue(text: str, star: bool) -> str:
 
 def _extract_material_from_secondary(secondary_tag: str, cfg: dict) -> dict | None:
     match = re.search(r"（([^）]+)）", secondary_tag)
-    if not match:
-        return None
-    label = match.group(1)
-    for material in cfg["materials"]:
-        if material["label"] == label:
+    if match:
+        label = match.group(1)
+        for material in cfg["materials"]:
+            if material["label"] == label:
+                return material
+        parts = [part.strip() for part in label.split("、") if part.strip()]
+        if parts:
+            return {"label": label, "items": [parts[0], parts[-1]]}
+
+    for material in sorted(cfg["materials"], key=lambda item: len(item["label"]), reverse=True):
+        if material["label"] in secondary_tag:
             return material
-    parts = [part.strip() for part in label.split("、") if part.strip()]
-    if not parts:
-        return None
-    return {"label": label, "items": [parts[0], parts[-1]]}
+
+    return None
 
 
-def generate_secondary_tag(level1: str) -> str:
+def generate_secondary_tag(level1: str) -> tuple[str, dict]:
     clean_level1 = _clean_tag(level1)
     cfg = GENERATOR_CONFIG[clean_level1]
     rng = _rng_for(level1)
@@ -686,80 +695,83 @@ def generate_secondary_tag(level1: str) -> str:
     rng.shuffle(prefixes)
     action_templates = cfg["secondary_actions"][:]
     rng.shuffle(action_templates)
-    variants = SECONDARY_VARIANTS[:]
-    rng.shuffle(variants)
+    extensions = SECONDARY_EXTENSIONS[:]
+    rng.shuffle(extensions)
     intros = SECONDARY_INTROS[:]
     rng.shuffle(intros)
+    style_templates = SECONDARY_STYLE_TEMPLATES[:]
+    rng.shuffle(style_templates)
+    style_templates.sort(key=lambda item: SECONDARY_STYLE_COUNTS[clean_level1][item[0]])
 
-    def build_secondary(prefix: str, action_text: str) -> str:
-        if "：" in prefix:
-            text = f"{prefix}{action_text}（{material['label']}）"
-        else:
-            text = f"{prefix}：{action_text}（{material['label']}）"
+    def build_secondary(style_template: str, prefix: str, intro: str, action_text: str, extension: str) -> str:
+        if "：" in prefix or ":" in prefix:
+            prefix = prefix.rstrip("：:")
+        text = style_template.format(
+            prefix=prefix,
+            intro=intro,
+            action=action_text,
+            extension=extension,
+            material=material["label"],
+        )
         return _sanitize_secondary(text)
 
-    for prefix in prefixes:
-        for action_template in action_templates:
-            base_action = action_template.format(
-                item1=material["items"][0],
-                item2=material["items"][-1],
-            )
-            for intro_index, intro in enumerate(intros):
-                action = f"{intro}{base_action}"
-                base_signature = f"{prefix}|{action_template}|intro:{intro_index}|base"
-                secondary = build_secondary(prefix, action)
-                stem = _secondary_stem(secondary)
-                if (
-                    secondary not in USED_SECONDARY_BY_TAG[clean_level1]
-                    and stem not in USED_SECONDARY_STEMS
-                    and base_signature not in USED_SECONDARY_SIGNATURES[clean_level1]
-                    and _secondary_skeleton(secondary) not in USED_SECONDARY_SKELETONS
-                    and _secondary_lead_key(secondary) not in USED_SECONDARY_LEADS
-                ):
-                    USED_SECONDARY_BY_TAG[clean_level1].add(secondary)
-                    USED_SECONDARY_STEMS.add(stem)
-                    USED_SECONDARY_SIGNATURES[clean_level1].add(base_signature)
-                    USED_SECONDARY_SKELETONS.add(_secondary_skeleton(secondary))
-                    USED_SECONDARY_LEADS.add(_secondary_lead_key(secondary))
-                    return secondary
-                for variant_index, variant in enumerate(variants):
-                    varied_action = f"{action}，{variant}"
-                    signature = f"{prefix}|{action_template}|intro:{intro_index}|variant:{variant_index}"
-                    secondary = build_secondary(prefix, varied_action)
-                    stem = _secondary_stem(secondary)
-                    if (
-                        secondary not in USED_SECONDARY_BY_TAG[clean_level1]
-                        and stem not in USED_SECONDARY_STEMS
-                        and signature not in USED_SECONDARY_SIGNATURES[clean_level1]
-                        and _secondary_skeleton(secondary) not in USED_SECONDARY_SKELETONS
-                        and _secondary_lead_key(secondary) not in USED_SECONDARY_LEADS
-                    ):
-                        USED_SECONDARY_BY_TAG[clean_level1].add(secondary)
-                        USED_SECONDARY_STEMS.add(stem)
-                        USED_SECONDARY_SIGNATURES[clean_level1].add(signature)
-                        USED_SECONDARY_SKELETONS.add(_secondary_skeleton(secondary))
-                        USED_SECONDARY_LEADS.add(_secondary_lead_key(secondary))
-                        return secondary
+    for style_name, style_template in style_templates:
+        for prefix in prefixes:
+            for action_template in action_templates:
+                base_action = action_template.format(
+                    item1=material["items"][0],
+                    item2=material["items"][-1],
+                )
+                for intro_index, intro in enumerate(intros):
+                    for extension_index, extension in enumerate(extensions):
+                        if style_name != "standard" and "材料" in intro:
+                            continue
+                        signature = (
+                            f"{style_name}|{prefix}|{action_template}|intro:{intro_index}|extension:{extension_index}"
+                        )
+                        secondary = build_secondary(style_template, prefix, intro, base_action, extension)
+                        stem = _secondary_stem(secondary)
+                        skeleton = _secondary_skeleton(secondary)
+                        lead_key = _secondary_lead_key(secondary)
+                        if (
+                            secondary not in USED_SECONDARY_BY_TAG[clean_level1]
+                            and USED_SECONDARY_STEMS[stem] < MAX_SECONDARY_STEM_REPEAT
+                            and signature not in USED_SECONDARY_SIGNATURES[clean_level1]
+                            and USED_SECONDARY_SKELETONS[skeleton] < MAX_SECONDARY_SKELETON_REPEAT
+                            and USED_SECONDARY_LEADS[lead_key] < MAX_SECONDARY_LEAD_REPEAT
+                        ):
+                            USED_SECONDARY_BY_TAG[clean_level1].add(secondary)
+                            USED_SECONDARY_STEMS[stem] += 1
+                            USED_SECONDARY_SIGNATURES[clean_level1].add(signature)
+                            USED_SECONDARY_SKELETONS[skeleton] += 1
+                            USED_SECONDARY_LEADS[lead_key] += 1
+                            SECONDARY_STYLE_COUNTS[clean_level1][style_name] += 1
+                            return secondary, material
 
     fallback_prefix = prefixes[0] if prefixes else "观察记录"
     fallback = build_secondary(
+        SECONDARY_STYLE_TEMPLATES[0][1],
         fallback_prefix,
-        f"围着{material['items'][0]}和{material['items'][-1]}试一试，再换一种做法",
+        "",
+        f"围着{material['items'][0]}和{material['items'][-1]}试一试",
+        "，再换一种做法",
     )
     USED_SECONDARY_BY_TAG[clean_level1].add(fallback)
-    USED_SECONDARY_STEMS.add(_secondary_stem(fallback))
+    USED_SECONDARY_STEMS[_secondary_stem(fallback)] += 1
     USED_SECONDARY_SIGNATURES[clean_level1].add(f"{fallback_prefix}|fallback|{material['label']}")
-    USED_SECONDARY_SKELETONS.add(_secondary_skeleton(fallback))
-    USED_SECONDARY_LEADS.add(_secondary_lead_key(fallback))
-    return fallback
+    USED_SECONDARY_SKELETONS[_secondary_skeleton(fallback)] += 1
+    USED_SECONDARY_LEADS[_secondary_lead_key(fallback)] += 1
+    SECONDARY_STYLE_COUNTS[clean_level1][SECONDARY_STYLE_TEMPLATES[0][0]] += 1
+    return fallback, material
 
 
-def generate_blue_text(level1: str, secondary_tag: str) -> str:
+def generate_blue_text(level1: str, secondary_tag: str, material: dict | None = None) -> str:
     clean_level1 = _clean_tag(level1)
     has_star = "★" in level1
     cfg = GENERATOR_CONFIG[clean_level1]
     rng = _rng_for(f"{level1}-blue")
-    material = _extract_material_from_secondary(secondary_tag, cfg)
+    if material is None:
+        material = _extract_material_from_secondary(secondary_tag, cfg)
     if material is None:
         material = _pick_material(cfg, rng, f"{clean_level1}-blue")
     names = _pick_names(rng, 4)
@@ -818,6 +830,6 @@ def ai_generator(level1: str) -> tuple[str, str]:
     if clean_level1 not in GENERATOR_CONFIG:
         raise ValueError(f"不支持的一级标签: {level1}")
 
-    secondary = generate_secondary_tag(level1)
-    blue = generate_blue_text(level1, secondary)
+    secondary, material = generate_secondary_tag(level1)
+    blue = generate_blue_text(level1, secondary, material)
     return secondary, blue
