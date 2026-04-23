@@ -1,9 +1,19 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import json
+import os
 import random
 import re
+import subprocess
+import tempfile
+from pathlib import Path
 
+from codex_prompt import (
+    BATCH_OUTPUT_SCHEMA,
+    LOGICAL_FLOW_SYSTEM_PROMPT,
+    build_batch_user_prompt,
+)
 from observation_templates import (
     BLUE_PATTERNS,
     BODY_PATTERN_PREFERENCES,
@@ -43,6 +53,37 @@ BODY_PATTERN_COUNTS = defaultdict(lambda: defaultdict(int))
 MAX_SECONDARY_STEM_REPEAT = 2
 MAX_SECONDARY_SKELETON_REPEAT = 2
 MAX_SECONDARY_LEAD_REPEAT = 2
+
+ACTION_WORDS = [
+    "拿",
+    "放",
+    "走",
+    "看",
+    "听",
+    "说",
+    "递",
+    "蹲",
+    "坐",
+    "站",
+    "推",
+    "摆",
+    "洗",
+    "擦",
+    "咬",
+    "喝",
+    "装",
+    "倒",
+    "排",
+    "跟",
+    "试",
+    "指",
+    "举",
+    "转",
+    "放回",
+]
+
+RECENT_LLM_SECONDARIES = defaultdict(list)
+RECENT_LLM_BLUE_SNIPPETS = defaultdict(list)
 
 SECONDARY_EXTENSIONS = [
     "",
@@ -915,7 +956,7 @@ def generate_blue_text(level1: str, secondary_tag: str, material: dict | None = 
     return sanitized
 
 
-def ai_generator(level1: str) -> tuple[str, str]:
+def template_ai_generator(level1: str, source_text: str | None = None) -> tuple[str, str]:
     clean_level1 = _clean_tag(level1)
     if clean_level1 not in GENERATOR_CONFIG:
         raise ValueError(f"不支持的一级标签: {level1}")
@@ -933,3 +974,276 @@ def ai_generator(level1: str) -> tuple[str, str]:
             return secondary, blue
 
     return fallback_secondary, fallback_blue
+
+
+def _extract_source_hint(source_text: str | None, level1: str) -> str:
+    if not source_text:
+        return ""
+
+    hint = source_text.strip()
+    for marker in (level1, level1.replace("★", ""), _clean_tag(level1)):
+        if marker and marker in hint:
+            hint = hint.split(marker, 1)[1]
+            break
+
+    hint = hint.lstrip("：:").strip()
+    hint = re.sub(r"\s+", " ", hint)
+    if hint in {"", "幼儿进行活动（材料）。幼儿在活动。", "幼儿在活动。"}:
+        return ""
+    return hint[:120]
+
+
+def _mentioned_names(text: str) -> list[str]:
+    return [name for name in NAMES if name in text]
+
+
+def _chunked(items: list[dict], size: int) -> list[list[dict]]:
+    return [items[index : index + size] for index in range(0, len(items), size)]
+
+
+def _ensure_response_care_text(text: str) -> str:
+    if re.search(r"通过.*(支持|帮助|引导)幼儿", text):
+        return text
+
+    addition = "通过示范轮流递接，帮助幼儿继续和同伴一起操作。"
+    if not text.endswith("。"):
+        text += "。"
+    return text + addition
+
+
+class CodexActivityGenerator:
+    def __init__(self) -> None:
+        self.codex_bin = os.getenv("DOCX_CODEX_BIN", "codex")
+        self.codex_model = os.getenv("DOCX_CODEX_MODEL", "").strip()
+        self.batch_size = max(1, int(os.getenv("DOCX_CODEX_BATCH_SIZE", "4")))
+        self.timeout = max(30, int(os.getenv("DOCX_CODEX_TIMEOUT", "360")))
+        self.sandbox = os.getenv("DOCX_CODEX_SANDBOX", "read-only")
+        self.workdir = os.getenv("DOCX_CODEX_WORKDIR", "/tmp")
+        self.reasoning_effort = os.getenv("DOCX_CODEX_REASONING_EFFORT", "high").strip()
+        self.include_source_hint = os.getenv("DOCX_INCLUDE_SOURCE_HINT", "1") == "1"
+        self.fallback_mode = os.getenv("DOCX_GENERATION_FALLBACK", "").strip().lower()
+        self._schema_path: str | None = None
+
+    def __call__(self, level1: str, source_text: str | None = None) -> tuple[str, str]:
+        return self.batch_generate([{"level1": level1, "source_text": source_text}])[0]
+
+    def batch_generate(self, requests: list[dict]) -> list[tuple[str, str]]:
+        prepared = [
+            self._prepare_request(index, item["level1"], item.get("source_text"))
+            for index, item in enumerate(requests)
+        ]
+        outputs: list[tuple[str, str]] = []
+
+        for chunk in _chunked(prepared, self.batch_size):
+            try:
+                outputs.extend(self._generate_chunk(chunk))
+            except Exception as chunk_error:
+                for request in chunk:
+                    try:
+                        outputs.extend(self._generate_chunk([request]))
+                    except Exception as single_error:
+                        if self.fallback_mode == "template":
+                            outputs.append(
+                                template_ai_generator(
+                                    request["level1"],
+                                    request.get("source_text"),
+                                )
+                            )
+                        else:
+                            raise RuntimeError(
+                                f"{request['level1']} 生成失败：{single_error}；批次错误：{chunk_error}"
+                            ) from single_error
+
+        return outputs
+
+    def _schema_path_for_batch(self) -> str:
+        if self._schema_path:
+            return self._schema_path
+
+        fd, path = tempfile.mkstemp(prefix="docx_replace_schema_", suffix=".json")
+        os.close(fd)
+        Path(path).write_text(
+            json.dumps(BATCH_OUTPUT_SCHEMA, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        self._schema_path = path
+        return path
+
+    def _prepare_request(self, index: int, level1: str, source_text: str | None) -> dict:
+        clean_level1 = _clean_tag(level1)
+        if clean_level1 not in GENERATOR_CONFIG:
+            raise ValueError(f"不支持的一级标签: {level1}")
+
+        rng = _rng_for(f"{level1}-codex")
+        cfg = GENERATOR_CONFIG[clean_level1]
+        material = _pick_material(cfg, rng, f"{clean_level1}-codex")
+        allowed_names = _pick_names(rng, 2)
+
+        action_hints = []
+        secondary_cfg = SHORT_SECONDARY_PARTS.get(clean_level1, {})
+        if secondary_cfg.get("actions"):
+            pool = secondary_cfg["actions"][:]
+            rng.shuffle(pool)
+            for action in pool[:4]:
+                action_hints.append(
+                    action.format(
+                        material=material["label"],
+                        item1=material["items"][0],
+                        item2=material["items"][-1],
+                    )
+                )
+        elif secondary_cfg.get("templates"):
+            pool = secondary_cfg["templates"][:]
+            rng.shuffle(pool)
+            for template in pool[:4]:
+                action_hints.append(
+                    template.format(
+                        material=material["label"],
+                        item1=material["items"][0],
+                        item2=material["items"][-1],
+                    )
+                )
+
+        needs_response_care = "★" in level1 and clean_level1 == "户外自主游戏"
+        blue_range = "90-120字" if "★" in level1 else "30-45字"
+        if needs_response_care:
+            blue_range = "100-140字"
+
+        return {
+            "index": index,
+            "level1": level1,
+            "clean_level1": clean_level1,
+            "age_range": "2岁-3岁",
+            "starred": "★" in level1,
+            "secondary_char_range": "8-14字优先，最多18字，不要过短",
+            "blue_char_range": blue_range,
+            "allowed_names": allowed_names,
+            "material": material,
+            "goal_hints": action_hints,
+            "needs_response_care": needs_response_care,
+            "source_hint": _extract_source_hint(source_text, level1)
+            if self.include_source_hint
+            else "",
+            "avoid_recent_secondary": RECENT_LLM_SECONDARIES[clean_level1][-3:],
+            "avoid_recent_blue": RECENT_LLM_BLUE_SNIPPETS[clean_level1][-2:],
+        }
+
+    def _generate_chunk(self, chunk: list[dict]) -> list[tuple[str, str]]:
+        prompt = f"{LOGICAL_FLOW_SYSTEM_PROMPT}\n\n{build_batch_user_prompt(chunk)}"
+        schema_path = self._schema_path_for_batch()
+
+        fd, output_path = tempfile.mkstemp(prefix="docx_replace_output_", suffix=".json")
+        os.close(fd)
+
+        cmd = [
+            self.codex_bin,
+            "exec",
+            "--color",
+            "never",
+            "--skip-git-repo-check",
+            "--ephemeral",
+            "--sandbox",
+            self.sandbox,
+            "-C",
+            self.workdir,
+            "--output-schema",
+            schema_path,
+            "-o",
+            output_path,
+        ]
+        if self.reasoning_effort:
+            cmd.extend(["-c", f'model_reasoning_effort="{self.reasoning_effort}"'])
+        if self.codex_model:
+            cmd.extend(["-m", self.codex_model])
+        cmd.append("-")
+
+        completed = subprocess.run(
+            cmd,
+            input=prompt,
+            text=True,
+            capture_output=True,
+            timeout=self.timeout,
+            check=False,
+        )
+        if completed.returncode != 0:
+            stderr = completed.stderr.strip()
+            stdout = completed.stdout.strip()
+            raise RuntimeError(
+                f"codex exec 失败，exit={completed.returncode}，stderr={stderr[-400:]}，stdout={stdout[-400:]}"
+            )
+
+        raw_output = Path(output_path).read_text(encoding="utf-8").strip()
+        payload = json.loads(raw_output)
+        items = payload.get("items")
+        if not isinstance(items, list):
+            raise ValueError(f"Codex 输出缺少 items: {raw_output[:200]}")
+        if len(items) != len(chunk):
+            raise ValueError(f"Codex 输出数量不匹配：期望 {len(chunk)}，实际 {len(items)}")
+
+        normalized = []
+        items_by_index = {item["index"]: item for item in items}
+        for request in chunk:
+            item = items_by_index.get(request["index"])
+            if item is None:
+                raise ValueError(f"Codex 输出缺少 index={request['index']} 的结果")
+            secondary, blue = self._normalize_result(request, item)
+            normalized.append((secondary, blue))
+            RECENT_LLM_SECONDARIES[request["clean_level1"]].append(secondary)
+            RECENT_LLM_SECONDARIES[request["clean_level1"]] = RECENT_LLM_SECONDARIES[
+                request["clean_level1"]
+            ][-6:]
+            RECENT_LLM_BLUE_SNIPPETS[request["clean_level1"]].append(blue[:40])
+            RECENT_LLM_BLUE_SNIPPETS[request["clean_level1"]] = RECENT_LLM_BLUE_SNIPPETS[
+                request["clean_level1"]
+            ][-4:]
+        return normalized
+
+    def _normalize_result(self, request: dict, item: dict) -> tuple[str, str]:
+        secondary = _sanitize_secondary(str(item.get("secondary", "")))
+        blue = _sanitize_blue(str(item.get("blue", "")), request["starred"])
+
+        secondary = re.sub(rf"^{re.escape(request['clean_level1'])}[:：]", "", secondary)
+        secondary = secondary.strip("“”\"' ")
+        blue = blue.strip("“”\"' ")
+        if request["needs_response_care"]:
+            blue = _ensure_response_care_text(blue)
+        if not blue.endswith("。"):
+            blue += "。"
+
+        self._validate_result(request, secondary, blue)
+        return secondary, blue
+
+    def _validate_result(self, request: dict, secondary: str, blue: str) -> None:
+        if not secondary or len(secondary) < 7 or len(secondary) > 18:
+            raise ValueError(f"小目标长度异常: {secondary}")
+        if "。" in secondary or "\n" in secondary:
+            raise ValueError(f"小目标格式异常: {secondary}")
+        if not blue or "\n" in blue:
+            raise ValueError("正文为空或包含换行")
+        if not any(word in blue for word in ACTION_WORDS):
+            raise ValueError(f"正文缺少动作感: {blue}")
+        if _has_significant_overlap(secondary, blue):
+            raise ValueError(f"小目标和正文重复度过高: {secondary} / {blue}")
+
+        mentioned = _mentioned_names(blue)
+        mentioned_unique = list(dict.fromkeys(mentioned))
+        if len(mentioned_unique) > 2:
+            raise ValueError(f"正文出现超过 2 个名字: {blue}")
+        if any(name not in request["allowed_names"] for name in mentioned_unique):
+            raise ValueError(
+                f"正文使用了未授权名字: {mentioned_unique}，允许={request['allowed_names']}"
+            )
+
+        min_blue_len = 24 if not request["starred"] else 72
+        max_blue_len = 70 if not request["starred"] else 145
+        if request["needs_response_care"]:
+            min_blue_len = 96
+            max_blue_len = 190
+        if len(blue) < min_blue_len or len(blue) > max_blue_len:
+            raise ValueError(f"正文长度异常({len(blue)}): {blue}")
+
+        if request["needs_response_care"] and not re.search(r"通过.*(支持|帮助|引导)幼儿", blue):
+            raise ValueError(f"户外自主游戏缺少回应性照护: {blue}")
+
+
+ai_generator = CodexActivityGenerator()

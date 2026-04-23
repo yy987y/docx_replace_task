@@ -96,69 +96,82 @@ def replace_in_paragraph(para, level1: str, new_secondary: str, new_blue: str):
     text_range.CharacterFormat.FontSize = 10.5
     text_range.CharacterFormat.TextColor = Color.get_Blue()
 
-def process_document(doc_path: str, ai_generator, max_count=None):
-    doc = Document()
-    doc.LoadFromFile(doc_path)
-    
+
+def _collect_targets(doc, max_count=None):
+    targets = []
     skip_tags = set()
-    
-    replaced_count = 0
     skipped_count = 0
+
+    def try_append(paragraph):
+        nonlocal skipped_count
+        level1 = is_level1_para(paragraph)
+        if not level1:
+            return False
+
+        clean_tag = TAG_ALIASES.get(level1.replace("★", ""), level1.replace("★", ""))
+        if clean_tag in skip_tags:
+            skipped_count += 1
+            print(f"跳过 {skipped_count}: {level1}")
+            return False
+
+        targets.append(
+            {
+                "paragraph": paragraph,
+                "level1": level1,
+                "source_text": paragraph.Text.strip(),
+            }
+        )
+        return max_count is not None and len(targets) >= max_count
 
     for sec_idx in range(doc.Sections.Count):
         sec = doc.Sections[sec_idx]
 
         for p_idx in range(sec.Body.Paragraphs.Count):
-            p = sec.Body.Paragraphs[p_idx]
-            level1 = is_level1_para(p)
-            if level1:
-                clean_tag = TAG_ALIASES.get(level1.replace('★', ''), level1.replace('★', ''))
-                if clean_tag in skip_tags:
-                    skipped_count += 1
-                    print(f"跳过 {skipped_count}: {level1}")
-                    continue
+            if try_append(sec.Body.Paragraphs[p_idx]):
+                return targets, skipped_count
 
-                new_sec, new_blue = ai_generator(level1)
-                replace_in_paragraph(p, level1, new_sec, new_blue)
-                replaced_count += 1
-                print(f"替换 {replaced_count}: {level1}")
-                if max_count and replaced_count >= max_count:
-                    break
-        if max_count and replaced_count >= max_count:
-            break
-        
         for obj_idx in range(sec.Body.ChildObjects.Count):
             obj = sec.Body.ChildObjects[obj_idx]
-            
-            if hasattr(obj, 'ChildObjects'):
-                for child_idx in range(obj.ChildObjects.Count):
-                    child = obj.ChildObjects[child_idx]
-                    
-                    if hasattr(child, "Body") and child.Body:
-                        for p_idx in range(child.Body.Paragraphs.Count):
-                            p = child.Body.Paragraphs[p_idx]
-                            level1 = is_level1_para(p)
-                            if level1:
-                                clean_tag = TAG_ALIASES.get(level1.replace('★', ''), level1.replace('★', ''))
-                                if clean_tag in skip_tags:
-                                    skipped_count += 1
-                                    print(f"跳过 {skipped_count}: {level1}")
-                                    continue
-                                
-                                new_sec, new_blue = ai_generator(level1)
-                                replace_in_paragraph(p, level1, new_sec, new_blue)
-                                replaced_count += 1
-                                print(f"替换 {replaced_count}: {level1}")
-                                
-                                # 如果达到最大数量，停止
-                                if max_count and replaced_count >= max_count:
-                                    break
-                        if max_count and replaced_count >= max_count:
-                            break
-                if max_count and replaced_count >= max_count:
-                    break
-        if max_count and replaced_count >= max_count:
-            break
+            if not hasattr(obj, "ChildObjects"):
+                continue
+            for child_idx in range(obj.ChildObjects.Count):
+                child = obj.ChildObjects[child_idx]
+                if not hasattr(child, "Body") or not child.Body:
+                    continue
+                for p_idx in range(child.Body.Paragraphs.Count):
+                    if try_append(child.Body.Paragraphs[p_idx]):
+                        return targets, skipped_count
+
+    return targets, skipped_count
+
+
+def process_document(doc_path: str, ai_generator, max_count=None):
+    doc = Document()
+    doc.LoadFromFile(doc_path)
+
+    targets, skipped_count = _collect_targets(doc, max_count=max_count)
+    replaced_count = 0
+
+    if hasattr(ai_generator, "batch_generate"):
+        generated_pairs = ai_generator.batch_generate(
+            [
+                {
+                    "level1": target["level1"],
+                    "source_text": target["source_text"],
+                }
+                for target in targets
+            ]
+        )
+    else:
+        generated_pairs = [
+            ai_generator(target["level1"], target["source_text"])
+            for target in targets
+        ]
+
+    for target, (new_sec, new_blue) in zip(targets, generated_pairs):
+        replace_in_paragraph(target["paragraph"], target["level1"], new_sec, new_blue)
+        replaced_count += 1
+        print(f"替换 {replaced_count}: {target['level1']}")
 
     output_path = "保教日志_替换后.docx"
     doc.SaveToFile(output_path, FileFormat.Docx2019)
