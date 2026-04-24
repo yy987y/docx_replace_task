@@ -1,0 +1,27 @@
+[runner] provider=ArkActivityGenerator
+[runner] model=doubao-seed-2-0-lite-260215
+[runner] input=/Users/yanchao/Documents/develop/docx_replace_task/2.docx
+[runner] target_count=17 skipped=0
+替换 1: 起床
+替换 2: ★加点能量
+替换 3: 户外体育游戏
+替换 4: ★户外自主游戏
+替换 5: 生活活动
+替换 6: 抱抱离园
+替换 7: 室内自主游戏
+替换 8: 加点能量
+替换 9: 早操律动
+替换 10: 主题活动
+替换 11: 户外体育游戏
+替换 12: ★户外自主游戏
+替换 13: 生活活动
+替换 14: 生活活动
+替换 15: 餐前活动
+替换 16: ★香香进餐
+替换 17: 餐后活动
+
+✅ 替换完成！
+替换: 17 个活动
+跳过: 0 个活动
+输出文件: 保教日志_替换后.docx
+[runner] elapsed_seconds=109.11

@@ -8,22 +8,28 @@ import re
 import subprocess
 import tempfile
 from pathlib import Path
+from urllib import error, request as urllib_request
 
 from codex_prompt import (
     BATCH_OUTPUT_SCHEMA,
+    DOUBAO_SYSTEM_PROMPT,
     LOGICAL_FLOW_SYSTEM_PROMPT,
     build_batch_user_prompt,
-)
-from observation_templates import (
-    BLUE_PATTERNS,
-    BODY_PATTERN_PREFERENCES,
-    FOCUSED_BODY_LIBRARY,
-    SECONDARY_LIBRARY,
-    SHORT_SECONDARY_PARTS,
+    build_doubao_batch_user_prompt,
 )
 
 
 NAMES = [
+    "糕糕",
+    "阳阳",
+    "叮当",
+    "圆圆",
+    "诞诞",
+    "又又",
+    "樾樾",
+    "登登",
+    "加加",
+    "喜悦",
     "乐诚",
     "君严",
     "汤圆",
@@ -31,28 +37,26 @@ NAMES = [
     "期期",
     "小天",
     "大宝",
-    "莫莉",
-    "登登",
-    "喜悦",
-    "糕糕",
     "小宝",
+]
+
+FORBIDDEN_CHILD_NAMES = [
+    "莫莉",
+    "星星",
+    "圆子",
+    "贝贝",
+    "火龙果",
+    "点点",
+    "想想",
+    "雅雅",
+    "廖钰雅",
+    "哥哥",
 ]
 
 FORBIDDEN_WORDS = ["开心", "快乐", "认真", "培养", "促进", "提高", "有趣", "！", "!"]
 RECENT_SCENES = defaultdict(list)
 RECENT_NAME_GROUPS = []
 TAG_CALL_COUNT = defaultdict(int)
-USED_SECONDARY_BY_TAG = defaultdict(set)
-USED_SECONDARY_STEMS = defaultdict(int)
-USED_SECONDARY_SIGNATURES = defaultdict(set)
-USED_SECONDARY_SKELETONS = defaultdict(int)
-USED_SECONDARY_LEADS = defaultdict(int)
-SECONDARY_STYLE_COUNTS = defaultdict(lambda: defaultdict(int))
-BODY_PATTERN_COUNTS = defaultdict(lambda: defaultdict(int))
-
-MAX_SECONDARY_STEM_REPEAT = 2
-MAX_SECONDARY_SKELETON_REPEAT = 2
-MAX_SECONDARY_LEAD_REPEAT = 2
 
 ACTION_WORDS = [
     "拿",
@@ -85,49 +89,12 @@ ACTION_WORDS = [
 RECENT_LLM_SECONDARIES = defaultdict(list)
 RECENT_LLM_BLUE_SNIPPETS = defaultdict(list)
 
-SECONDARY_EXTENSIONS = [
-    "",
-    "，再看看同伴的做法",
-    "，再按顺序做下一步",
-    "，再换一种方式试试",
-    "，再听提示做后面的动作",
-    "，再继续完成接下来的动作",
-]
-
-SECONDARY_INTROS = [
-    "",
-    "听到老师提醒后，",
-    "轮到自己时，",
-    "走到前面后，",
-    "看着材料时，",
-    "坐稳以后，",
-    "伸手过去时，",
-    "低头看看后，",
-    "把东西放好后，",
-    "跟着老师提示时，",
-    "自己试一试时，",
-    "转过身后，",
-    "看见同伴后，",
-    "把小手放好后，",
-    "慢慢走近时，",
-    "回到位置上后，",
-]
-
-SECONDARY_STYLE_TEMPLATES = [
-    ("standard", "{prefix}：{intro}{action}{extension}"),
-    ("around_material", "{prefix}：围绕{material}，{intro}{action}{extension}"),
-    ("with_material", "{prefix}：结合{material}时，{intro}{action}{extension}"),
-    ("process_material", "{prefix}：在接触{material}的过程中，{intro}{action}{extension}"),
-    ("continue_try", "{prefix}：借助{material}继续尝试，{intro}{action}{extension}"),
-]
-
-
 TAG_ALIASES = {
     "香香进餐": "午餐",
 }
 
 
-GENERATOR_CONFIG = {
+MATERIAL_CONFIG = {
     "室内自主游戏": {
         "materials": [
             {"label": "积木、小车", "items": ["积木", "小车"]},
@@ -135,31 +102,6 @@ GENERATOR_CONFIG = {
             {"label": "串珠、绳子", "items": ["串珠", "绳子"]},
             {"label": "纸杯、木夹", "items": ["纸杯", "木夹"]},
             {"label": "拼图、托盘", "items": ["拼图", "托盘"]},
-        ],
-        "secondary_prefixes": ["重点观察", "观察记录"],
-        "secondary_actions": [
-            "把{item1}排成一排，再让{item2}从旁边经过",
-            "拿起{item1}装进{item2}里，再倒出来",
-            "把{item1}一个个连起来，递给旁边的小朋友",
-            "把{item1}摆开后，伸手去拿{item2}",
-            "把{item1}按颜色分开，再放进小盘里",
-        ],
-        "short_sentences": [
-            "{n1}把{item1}摆在地垫上。",
-            "{n1}拿起{item2}碰了碰{item1}。",
-            "{n2}走过来说“我也要”。",
-            "{n1}把{item1}递给{n2}。",
-            "老师说“慢慢放进去”。",
-            "{n3}蹲下来继续摆{item1}。",
-        ],
-        "long_sentences": [
-            "{n1}把{item1}一个个摆开。",
-            "{n2}拿着{item2}走过来说“给我一个”。",
-            "{n1}分出一份放到{n2}手边。",
-            "{n3}蹲下来跟着一起摆。",
-            "老师说“你们可以一起放”。",
-            "{n4}把做好的一份放进盘里。",
-            "{n2}又把{item2}轻轻挪到旁边。",
         ],
     },
     "加点能量": {
@@ -170,29 +112,6 @@ GENERATOR_CONFIG = {
             {"label": "蔬菜干、小碗", "items": ["蔬菜干", "小碗"]},
             {"label": "坚果、小盘子", "items": ["坚果", "小盘子"]},
         ],
-        "secondary_prefixes": ["能够自己取点心", "愿意坐下来吃点心", "自己拿起点心再喝一口"],
-        "secondary_actions": [
-            "拿起{item1}咬一口，再把{item2}放回桌上",
-            "坐到小椅子上，自己拿起{item1}",
-            "伸手去拿{item1}，再端起{item2}",
-            "把{item1}放进嘴里，再把{item2}递给老师",
-        ],
-        "short_sentences": [
-            "{n1}拿起{item1}咬了一口。",
-            "{n2}说“我要{item2}”。",
-            "老师把{item2}放到桌边。",
-            "{n1}吃完后把杯子放回篮子里。",
-            "{n3}坐在旁边慢慢吃。",
-        ],
-        "long_sentences": [
-            "{n1}走到点心桌前拿起{item1}。",
-            "{n2}坐下来后说“我要{item2}”。",
-            "老师把{item2}放到{n2}手边。",
-            "{n3}吃完后把小杯子放回篮子里。",
-            "{n4}看着桌上的点心又伸手拿了一块。",
-            "{n1}咬了一口后转头看看旁边的小朋友。",
-            "{n2}喝完后把杯子轻轻放下。",
-        ],
     },
     "早操律动": {
         "materials": [
@@ -200,29 +119,6 @@ GENERATOR_CONFIG = {
             {"label": "纱巾", "items": ["纱巾", "纱巾"]},
             {"label": "响环", "items": ["响环", "响环"]},
             {"label": "小鼓、鼓槌", "items": ["小鼓", "鼓槌"]},
-        ],
-        "secondary_prefixes": ["跟着音乐做动作", "愿意和同伴一起动一动"],
-        "secondary_actions": [
-            "拿着{item1}碰一碰，再跟着音乐抬起手",
-            "伸出小手跟着老师拍一拍",
-            "把{item1}举起来，再轻轻落下来",
-            "听到音乐后拿起{item1}动一动",
-        ],
-        "short_sentences": [
-            "老师说“我们一起动一动”。",
-            "{n1}拿起{item1}跟着拍手。",
-            "{n2}碰了碰{n1}手里的{item1}。",
-            "{n3}听到音乐后转了半圈。",
-            "老师又说“停一下，再来”。",
-        ],
-        "long_sentences": [
-            "音乐一响，{n1}先把{item1}举了起来。",
-            "{n2}看见后也跟着拍了拍手。",
-            "{n3}拿着{item1}走到{n1}旁边碰一碰。",
-            "老师说“脚也一起抬起来”。",
-            "{n4}跟着老师慢慢蹲下又站起来。",
-            "{n2}停下来看了一眼老师，又继续动。",
-            "{n1}把{item1}递给{n3}再接回来。",
         ],
     },
     "制作": {
@@ -232,29 +128,6 @@ GENERATOR_CONFIG = {
             {"label": "贴纸、白纸", "items": ["贴纸", "白纸"]},
             {"label": "蜡笔、画纸", "items": ["蜡笔", "画纸"]},
         ],
-        "secondary_prefixes": ["能够自己选材料", "愿意按一按再贴上去", "教学"],
-        "secondary_actions": [
-            "拿起{item1}按一按，再用{item2}贴上",
-            "选一张{item1}撕成小块，再放到纸上",
-            "拿着{item1}在纸上点一点，再换一只手",
-            "把{item1}贴在白纸上，再伸手去拿{item2}",
-        ],
-        "short_sentences": [
-            "{n1}拿起{item1}放到桌上。",
-            "{n2}伸手去拿{item2}。",
-            "{n1}把一小块贴到纸上。",
-            "老师说“按一按就可以了”。",
-            "{n3}把做好的纸递给老师看。",
-        ],
-        "long_sentences": [
-            "{n1}先选了一张{item1}放在桌上。",
-            "{n2}拿着{item2}在旁边等着。",
-            "{n1}把一小块贴到纸上后又按了按。",
-            "老师说“可以再拿一块放旁边”。",
-            "{n3}看见后也伸手来拿材料。",
-            "{n4}把做好的一张纸递到老师面前。",
-            "{n2}低头继续把边上的一块贴好。",
-        ],
     },
     "主题活动": {
         "materials": [
@@ -263,33 +136,6 @@ GENERATOR_CONFIG = {
             {"label": "水果卡片、小篮子", "items": ["水果卡片", "小篮子"]},
             {"label": "小动物图片、托盘", "items": ["小动物图片", "托盘"]},
         ],
-        "secondary_prefixes": ["教学", "阅读", "认识活动"],
-        "secondary_actions": [
-            "看着{item1}说出上面的东西",
-            "把{item1}放进{item2}里，再说出名字",
-            "翻到{item1}这一页后伸手指一指",
-            "拿起{item1}和老师一起看一看",
-        ],
-        "short_sentences": [
-            "老师拿出{item1}放在前面。",
-            "{n1}伸手指了指上面的图。",
-            "{n2}说出“这是这个”。",
-            "老师点点头又翻到下一张。",
-            "{n3}跟着把{item1}放进{item2}里。",
-            "{n4}把卡片递给老师后又坐回位置上。",
-            "老师把图片排开，请大家一个个看。",
-        ],
-        "long_sentences": [
-            "老师先拿出{item1}放在桌上。",
-            "{n1}伸手指了指上面的图说出名字。",
-            "{n2}看见后把另一张{item1}递给老师。",
-            "老师说“我们再看看这一张”。",
-            "{n3}把{item1}放进{item2}里后又拿出来看。",
-            "{n4}坐在旁边跟着重复了一遍。",
-            "老师把图片排开，让大家一个个看。",
-            "{n1}把手边的一张卡片翻过来又看了一眼。",
-            "{n2}把看到的图片递到老师手里。",
-        ],
     },
     "户外体育游戏": {
         "materials": [
@@ -297,29 +143,6 @@ GENERATOR_CONFIG = {
             {"label": "呼啦圈、地垫", "items": ["呼啦圈", "地垫"]},
             {"label": "隧道筒、垫子", "items": ["隧道筒", "垫子"]},
             {"label": "平衡木、小旗", "items": ["平衡木", "小旗"]},
-        ],
-        "secondary_prefixes": ["能够往前走一走", "愿意排队轮流玩", "跟着路线动一动"],
-        "secondary_actions": [
-            "推着{item1}绕过{item2}走到前面",
-            "钻过{item1}后再踩上{item2}",
-            "拿着{item1}走到终点再转回来",
-            "一步一步走过{item1}，再伸手去拿{item2}",
-        ],
-        "short_sentences": [
-            "{n1}推着{item1}往前走。",
-            "{n2}在后面看着前面的路线。",
-            "老师说“轮到你再出发”。",
-            "{n3}走到终点后转身回来。",
-            "{n1}把{item1}放到旁边。",
-        ],
-        "long_sentences": [
-            "{n1}先推着{item1}绕过{item2}。",
-            "{n2}站在后面等着轮到自己。",
-            "老师说“慢慢走，脚踩稳”。",
-            "{n3}走到终点后回头看了看老师。",
-            "{n4}接过{item1}继续往前走。",
-            "{n2}等前面空出来后才迈步出去。",
-            "{n1}把{item1}放回起点又站到队尾。",
         ],
     },
     "户外自主游戏": {
@@ -330,68 +153,12 @@ GENERATOR_CONFIG = {
             {"label": "小车、塑料杯", "items": ["小车", "塑料杯"]},
             {"label": "水盆、小勺子", "items": ["水盆", "小勺子"]},
         ],
-        "secondary_prefixes": ["重点观察", "观察记录"],
-        "secondary_actions": [
-            "拿起{item1}装一装，再倒进{item2}里",
-            "把{item1}放在垫子上，再递给旁边的小朋友",
-            "弯腰捡起{item1}，再放进{item2}",
-            "推着{item1}走到一边，再拿出{item2}",
-        ],
-        "short_sentences": [
-            "{n1}拿起{item1}装了一下。",
-            "{n2}把{item2}挪到{n1}旁边。",
-            "{n1}倒进去后又看了看。",
-            "{n3}说“给我一点”。",
-            "老师蹲下来看着他们继续玩。",
-        ],
-        "long_sentences": [
-            "{n1}先把{item2}放在地上。",
-            "{n2}拿起{item1}装了一些又倒进去。",
-            "{n3}走过来说“我也来”。",
-            "{n1}把手里的{item1}递给{n3}。",
-            "老师蹲下来说“你们可以轮流用”。",
-            "{n4}又把旁边的一份挪到垫子上。",
-            "{n2}看见后继续把东西装进{item2}里。",
-        ],
-        "response_care": [
-            "通过蹲下说明轮流顺序，帮助婴幼儿等待和交接。",
-            "通过回应幼儿的目光和动作，帮助婴幼儿回到同伴游戏中。",
-            "通过示范把材料轻轻递给同伴，帮助婴幼儿学着表达和协商。",
-            "通过陪伴幼儿一起装和倒，帮助婴幼儿积累操作经验。",
-        ],
     },
     "起床": {
         "materials": [
             {"label": "小被子、鞋子", "items": ["小被子", "鞋子"]},
             {"label": "被子、小袜子", "items": ["被子", "小袜子"]},
             {"label": "枕头、外套", "items": ["枕头", "外套"]},
-        ],
-        "secondary_prefixes": ["能在提醒下起身", "愿意跟着老师穿好鞋子"],
-        "secondary_actions": [
-            "坐起来后伸脚去找{item2}",
-            "把{item1}推到一边，再拿起{item2}",
-            "听到老师提醒后坐起来穿{item2}",
-            "醒来后先拉开{item1}再伸手拿{item2}",
-        ],
-        "short_sentences": [
-            "老师轻声叫{n1}起床。",
-            "{n1}坐起来后伸脚去找{item2}。",
-            "{n2}把{item1}推到一边。",
-            "老师说“鞋子在这里”。",
-            "{n1}低头把脚伸进去。",
-            "{n2}坐在床边看着老师帮旁边的小朋友。",
-            "{n1}站起来后把被角往里推了推。",
-        ],
-        "long_sentences": [
-            "老师轻轻拍了拍{n1}说“该起床了”。",
-            "{n1}坐起来后揉了揉眼睛。",
-            "{n2}已经把{item1}推到一边，低头找自己的{item2}。",
-            "老师把{item2}放到{n1}脚边说“先穿这一只”。",
-            "{n3}坐在床边看着老师帮旁边的小朋友。",
-            "{n4}穿好一只后又弯腰去找另一只。",
-            "{n1}站起来后把小被子往里面推了推。",
-            "{n2}把找到的一只鞋先放到脚边。",
-            "老师扶着{n3}站起来整理衣角。",
         ],
     },
     "生活活动": {
@@ -401,58 +168,12 @@ GENERATOR_CONFIG = {
             {"label": "洗手液、毛巾", "items": ["洗手液", "毛巾"]},
             {"label": "小杯子、纸巾", "items": ["小杯子", "纸巾"]},
         ],
-        "secondary_prefixes": ["能够自己表达需要", "愿意跟着步骤做一做", "生活观察"],
-        "secondary_actions": [
-            "需要时去拿{item1}再找老师帮忙",
-            "先伸手拿{item1}，再把{item2}放回原位",
-            "走到前面说出需要，再接过{item1}",
-            "把{item1}用完后放回篮子里",
-        ],
-        "short_sentences": [
-            "{n1}走到老师面前说“要擦一擦”。",
-            "老师把{item1}递到{n1}手里。",
-            "{n2}看见后也走过来。",
-            "{n1}用完后把{item1}放回篮子里。",
-            "{n3}在旁边继续等着。",
-        ],
-        "long_sentences": [
-            "{n1}走到老师面前说“要擦一擦”。",
-            "老师把{item1}递到{n1}手里后又看了看旁边的小朋友。",
-            "{n2}看见后也跟着走过来伸出手。",
-            "{n3}用完{item2}后把它挂回原位。",
-            "老师说“用好了要放回去”。",
-            "{n4}转身去拿自己的小杯子又放回桌上。",
-            "{n1}擦完后把{item1}轻轻丢进垃圾桶。",
-        ],
     },
     "抱抱离园": {
         "materials": [
             {"label": "外套、书包", "items": ["外套", "书包"]},
             {"label": "水杯、书包", "items": ["水杯", "书包"]},
             {"label": "室外鞋、小书包", "items": ["室外鞋", "小书包"]},
-        ],
-        "secondary_prefixes": ["愿意整理好物品再离开", "能和老师说再见"],
-        "secondary_actions": [
-            "拿起{item1}穿好，再背起{item2}",
-            "把{item1}放进{item2}里，再走到门口",
-            "换好{item1}后背起{item2}",
-            "拉一拉{item1}，再抬手和老师说再见",
-        ],
-        "short_sentences": [
-            "{n1}拿起{item1}往身上套。",
-            "{n2}把{item2}递到旁边。",
-            "老师说“我们去门口等一等”。",
-            "{n1}背好后抬手说“再见”。",
-            "{n3}站在门边看着外面。",
-        ],
-        "long_sentences": [
-            "{n1}先把{item1}穿到身上。",
-            "{n2}低头把{item2}背到背上。",
-            "老师说“水杯也一起带上”。",
-            "{n3}把自己的东西拿好后走到门口。",
-            "{n4}抬手对老师说“再见”。",
-            "{n1}又回头看了一眼教室里的小朋友。",
-            "老师站在旁边帮他们把背带拉整齐。",
         ],
     },
     "餐前活动": {
@@ -461,33 +182,6 @@ GENERATOR_CONFIG = {
             {"label": "图书、地垫", "items": ["图书", "地垫"]},
             {"label": "手指玩偶", "items": ["手指玩偶", "手指玩偶"]},
         ],
-        "secondary_prefixes": ["愿意和老师一起等一等", "跟着做手指动作", "愿意坐下来听一听"],
-        "secondary_actions": [
-            "伸出{item1}跟着老师做一做",
-            "坐到{item2}上看着{item1}",
-            "听到{item2}后跟着拍一拍",
-            "看着老师手里的{item1}伸手碰一碰",
-        ],
-        "short_sentences": [
-            "老师说“我们先一起等一等”。",
-            "{n1}伸出{item1}跟着做动作。",
-            "{n2}看着老师手里的{item1}笑了笑。",
-            "{n3}坐在旁边轻轻拍手。",
-            "老师又说“做完就去吃饭”。",
-            "{n4}把手放在腿上等老师继续说。",
-            "{n2}抬头看着前面的老师没有离开位置。",
-        ],
-        "long_sentences": [
-            "老师先说“我们坐下来做个手指游戏”。",
-            "{n1}伸出{item1}跟着老师一下一下做。",
-            "{n2}看着老师手里的{item1}也伸手碰了碰。",
-            "{n3}坐在地垫上跟着拍手。",
-            "老师说“做完我们就去洗手”。",
-            "{n4}把手放到腿上后又抬起来继续做。",
-            "{n1}看见旁边的小朋友做了，也跟着再做一遍。",
-            "{n2}停下来后抬头看着老师等下一步提醒。",
-            "{n3}做完一遍后把手轻轻放回腿上。",
-        ],
     },
     "午餐": {
         "materials": [
@@ -495,58 +189,12 @@ GENERATOR_CONFIG = {
             {"label": "米饭、小碗", "items": ["米饭", "小碗"]},
             {"label": "青菜、勺子", "items": ["青菜", "勺子"]},
         ],
-        "secondary_prefixes": ["自主进餐", "愿意自己舀一舀", "安静坐在位置上吃饭"],
-        "secondary_actions": [
-            "拿起{item1}舀一口，再把掉下的饭粒放回{item2}",
-            "坐在位置上拿着{item1}慢慢吃",
-            "把{item1}送到嘴边，再看看桌上的{item2}",
-            "自己舀起一口后继续坐在位置上",
-        ],
-        "short_sentences": [
-            "{n1}拿起{item1}舀了一口。",
-            "{n2}低头把掉下的饭粒捡回{item2}里。",
-            "老师说“慢慢吃，坐在这里”。",
-            "{n3}继续把{item1}送到嘴边。",
-            "{n1}吃完一口后又去舀下一口。",
-        ],
-        "long_sentences": [
-            "{n1}坐在位置上拿起{item1}慢慢吃。",
-            "{n2}发现桌上掉了一点饭粒，低头把它捡回{item2}里。",
-            "老师说“舀好了再送到嘴里”。",
-            "{n3}把一口饭送进嘴里后又去舀下一口。",
-            "{n4}看着旁边的小朋友，也把勺子放进碗里。",
-            "{n1}吃完后把勺子轻轻放在碗边。",
-            "{n2}继续坐在位置上没有离开桌边。",
-        ],
     },
     "餐后活动": {
         "materials": [
             {"label": "积木", "items": ["积木", "积木"]},
             {"label": "图书、地垫", "items": ["图书", "地垫"]},
             {"label": "拼图、托盘", "items": ["拼图", "托盘"]},
-        ],
-        "secondary_prefixes": ["吃完后愿意安静玩一会", "愿意自己去选一样玩具"],
-        "secondary_actions": [
-            "走到一边拿起{item1}玩一玩",
-            "把{item1}放在{item2}上再伸手去拿下一块",
-            "翻开{item1}看一看，再坐回{item2}上",
-            "拿起{item1}后坐到旁边的小椅子上",
-        ],
-        "short_sentences": [
-            "{n1}吃完后走到一边拿起{item1}。",
-            "{n2}坐在旁边看着{n1}手里的东西。",
-            "{n3}也走过来拿了一份。",
-            "老师说“在这里玩一会儿”。",
-            "{n1}把{item1}放到{item2}上继续看。",
-        ],
-        "long_sentences": [
-            "{n1}吃完后先走到一边拿起{item1}。",
-            "{n2}看见后也坐到旁边的小椅子上。",
-            "{n3}把另一份{item1}放到{item2}上慢慢摆。",
-            "老师说“吃好了可以在这里看一会儿”。",
-            "{n4}翻了翻手里的{item1}又递给旁边的小朋友。",
-            "{n1}看了一会儿后又拿起另一块继续摆。",
-            "{n2}没有说话，只是低头继续玩手里的东西。",
         ],
     },
 }
@@ -590,53 +238,6 @@ def _pick_material(cfg: dict, rng: random.Random, tag: str) -> dict:
     return material
 
 
-def _pick_pattern(patterns: list[list[str]], key: str, rng: random.Random) -> list[str]:
-    indexed = list(enumerate(patterns))
-    indexed.sort(key=lambda item: BODY_PATTERN_COUNTS[key][item[0]])
-    lowest = BODY_PATTERN_COUNTS[key][indexed[0][0]]
-    candidates = [item for item in indexed if BODY_PATTERN_COUNTS[key][item[0]] == lowest]
-    rng.shuffle(candidates)
-    index, pattern = candidates[0]
-    BODY_PATTERN_COUNTS[key][index] += 1
-    return pattern
-
-
-def _pattern_orders_for_secondary(clean_level1: str, secondary_tag: str, mode: str, pattern_count: int) -> list[int]:
-    orders: list[int] = []
-    for rule in BODY_PATTERN_PREFERENCES.get(clean_level1, []):
-        if any(keyword in secondary_tag for keyword in rule["keywords"]):
-            orders.extend(index for index in rule.get(mode, []) if index < pattern_count)
-    deduped = []
-    for index in orders:
-        if index not in deduped:
-            deduped.append(index)
-    return deduped
-
-
-def _fill_templates(templates: list[str], mapping: dict, target_count: int, rng: random.Random) -> list[str]:
-    pool = templates[:]
-    rng.shuffle(pool)
-    results = []
-    for template in pool:
-        sentence = template.format(**mapping)
-        results.append(sentence)
-        if len(results) >= target_count:
-            break
-    return results
-
-
-def _compose_text(sentences: list[str], min_len: int, max_len: int) -> str:
-    text = ""
-    for sentence in sentences:
-        if len(text) >= min_len and len(text) + len(sentence) > max_len:
-            continue
-        if len(text) + len(sentence) <= max_len or len(text) < min_len:
-            text += sentence
-        if min_len <= len(text) <= max_len:
-            break
-    return text[:max_len].rstrip("，。、")
-
-
 def _normalized_text(text: str) -> str:
     text = re.sub(r"（[^）]*）", "", text)
     return re.sub(r"[\W_]+", "", text)
@@ -659,32 +260,6 @@ def _has_significant_overlap(secondary_tag: str, blue_text: str) -> bool:
     return False
 
 
-def _select_sentences_without_overlap(
-    templates: list[str],
-    mapping: dict,
-    target_count: int,
-    rng: random.Random,
-    secondary_tag: str,
-) -> list[str]:
-    pool = templates[:]
-    rng.shuffle(pool)
-    selected = []
-    rejected = []
-    for template in pool:
-        sentence = template.format(**mapping)
-        if _has_significant_overlap(secondary_tag, sentence):
-            rejected.append(sentence)
-            continue
-        selected.append(sentence)
-        if len(selected) >= target_count:
-            return selected
-    for sentence in rejected:
-        selected.append(sentence)
-        if len(selected) >= target_count:
-            break
-    return selected
-
-
 def _sanitize_secondary(text: str) -> str:
     text = re.sub(r"\s+", "", text)
     text = text.lstrip("：:")
@@ -692,37 +267,6 @@ def _sanitize_secondary(text: str) -> str:
     for word in FORBIDDEN_WORDS:
         text = text.replace(word, "")
     return text
-
-
-def _secondary_stem(text: str) -> str:
-    return re.sub(r"（[^）]*）", "", _sanitize_secondary(text)).strip()
-
-
-def _known_items() -> list[str]:
-    return sorted(
-        {
-            item
-            for tag_config in GENERATOR_CONFIG.values()
-            for material in tag_config["materials"]
-            for item in material["items"]
-        },
-        key=len,
-        reverse=True,
-    )
-
-
-KNOWN_ITEMS = _known_items()
-
-
-def _secondary_skeleton(text: str) -> str:
-    skeleton = re.sub(r"（[^）]*）", "", _sanitize_secondary(text))
-    for item in KNOWN_ITEMS:
-        skeleton = skeleton.replace(item, "<ITEM>")
-    return re.sub(r"\s+", "", skeleton)
-
-
-def _secondary_lead_key(text: str) -> str:
-    return _secondary_skeleton(text)[:18]
 
 
 def _sanitize_blue(text: str, star: bool) -> str:
@@ -739,241 +283,6 @@ def _sanitize_blue(text: str, star: bool) -> str:
         if last_period >= max_len * 0.75:
             text = text[: last_period + 1]
     return text
-
-
-def _extract_material_from_secondary(secondary_tag: str, cfg: dict) -> dict | None:
-    match = re.search(r"（([^）]+)）", secondary_tag)
-    if match:
-        label = match.group(1)
-        for material in cfg["materials"]:
-            if material["label"] == label:
-                return material
-        parts = [part.strip() for part in label.split("、") if part.strip()]
-        if parts:
-            return {"label": label, "items": [parts[0], parts[-1]]}
-
-    for material in sorted(cfg["materials"], key=lambda item: len(item["label"]), reverse=True):
-        if material["label"] in secondary_tag:
-            return material
-
-    return None
-
-
-def _preferred_material_for_secondary(clean_level1: str, secondary_tag: str, cfg: dict, fallback: dict) -> dict:
-    if clean_level1 != "生活活动":
-        return fallback
-
-    preferred_label = None
-    if any(keyword in secondary_tag for keyword in ["接水", "喝水", "小杯子"]):
-        preferred_label = "小杯子、纸巾"
-    elif any(keyword in secondary_tag for keyword in ["水杯", "杯架"]):
-        preferred_label = "毛巾、水杯"
-    elif any(keyword in secondary_tag for keyword in ["热水", "洗手", "洗手液"]):
-        preferred_label = "洗手液、毛巾"
-    elif any(keyword in secondary_tag for keyword in ["毛巾", "手心", "手背", "擦汗", "额头", "脸"]):
-        preferred_label = "毛巾、水杯"
-    elif any(keyword in secondary_tag for keyword in ["纸巾", "嘴", "垃圾桶"]):
-        preferred_label = "纸巾"
-
-    if not preferred_label:
-        return fallback
-
-    for material in cfg["materials"]:
-        if material["label"] == preferred_label:
-            return material
-    return fallback
-
-
-def generate_secondary_tag(level1: str) -> tuple[str, dict]:
-    clean_level1 = _clean_tag(level1)
-    cfg = GENERATOR_CONFIG[clean_level1]
-    rng = _rng_for(level1)
-    material = _pick_material(cfg, rng, clean_level1)
-    secondary_cfg = SHORT_SECONDARY_PARTS[clean_level1]
-    if secondary_cfg.get("templates"):
-        templates = secondary_cfg["templates"][:]
-        rng.shuffle(templates)
-        for template in templates:
-            secondary = _sanitize_secondary(
-                template.format(
-                    material=material["label"],
-                    item1=material["items"][0],
-                    item2=material["items"][-1],
-                )
-            )
-            if not secondary or len(secondary) > 24:
-                continue
-            stem = _secondary_stem(secondary)
-            skeleton = _secondary_skeleton(secondary)
-            lead_key = _secondary_lead_key(secondary)
-            if (
-                secondary not in USED_SECONDARY_BY_TAG[clean_level1]
-                and USED_SECONDARY_STEMS[stem] < MAX_SECONDARY_STEM_REPEAT
-                and USED_SECONDARY_SKELETONS[skeleton] < MAX_SECONDARY_SKELETON_REPEAT
-                and USED_SECONDARY_LEADS[lead_key] < MAX_SECONDARY_LEAD_REPEAT
-            ):
-                material = _preferred_material_for_secondary(clean_level1, secondary, cfg, material)
-                USED_SECONDARY_BY_TAG[clean_level1].add(secondary)
-                USED_SECONDARY_STEMS[stem] += 1
-                USED_SECONDARY_SKELETONS[skeleton] += 1
-                USED_SECONDARY_LEADS[lead_key] += 1
-                return secondary, material
-
-    frames = secondary_cfg["frames"][:]
-    actions = secondary_cfg["actions"][:]
-    qualifiers = secondary_cfg["qualifiers"][:]
-    rng.shuffle(frames)
-    rng.shuffle(actions)
-    rng.shuffle(qualifiers)
-
-    def build_secondary(frame: str, action: str, qualifier: str) -> str:
-        action_text = action.format(
-            material=material["label"],
-            item1=material["items"][0],
-            item2=material["items"][-1],
-        )
-        text = frame.format(
-            action=action_text,
-            material=material["label"],
-            item1=material["items"][0],
-            item2=material["items"][-1],
-        )
-        text = _sanitize_secondary(text + qualifier)
-        return text
-
-    for frame_index, frame in enumerate(frames):
-        for action_index, action in enumerate(actions):
-            for qualifier_index, qualifier in enumerate(qualifiers):
-                signature = f"frame:{frame_index}|action:{action_index}|qualifier:{qualifier_index}"
-                secondary = build_secondary(frame, action, qualifier)
-                if not secondary or len(secondary) > 24:
-                    continue
-                stem = _secondary_stem(secondary)
-                skeleton = _secondary_skeleton(secondary)
-                lead_key = _secondary_lead_key(secondary)
-                if (
-                    secondary not in USED_SECONDARY_BY_TAG[clean_level1]
-                    and USED_SECONDARY_STEMS[stem] < MAX_SECONDARY_STEM_REPEAT
-                    and signature not in USED_SECONDARY_SIGNATURES[clean_level1]
-                    and USED_SECONDARY_SKELETONS[skeleton] < MAX_SECONDARY_SKELETON_REPEAT
-                    and USED_SECONDARY_LEADS[lead_key] < MAX_SECONDARY_LEAD_REPEAT
-                ):
-                    material = _preferred_material_for_secondary(clean_level1, secondary, cfg, material)
-                    USED_SECONDARY_BY_TAG[clean_level1].add(secondary)
-                    USED_SECONDARY_STEMS[stem] += 1
-                    USED_SECONDARY_SIGNATURES[clean_level1].add(signature)
-                    USED_SECONDARY_SKELETONS[skeleton] += 1
-                    USED_SECONDARY_LEADS[lead_key] += 1
-                    return secondary, material
-
-    fallback = build_secondary(frames[0], actions[0], "")
-    material = _preferred_material_for_secondary(clean_level1, fallback, cfg, material)
-    USED_SECONDARY_BY_TAG[clean_level1].add(fallback)
-    USED_SECONDARY_STEMS[_secondary_stem(fallback)] += 1
-    USED_SECONDARY_SIGNATURES[clean_level1].add(f"{fallback}|fallback")
-    USED_SECONDARY_SKELETONS[_secondary_skeleton(fallback)] += 1
-    USED_SECONDARY_LEADS[_secondary_lead_key(fallback)] += 1
-    return fallback, material
-
-
-def _focused_body_candidates(clean_level1: str, secondary_tag: str, mode: str) -> list[list[str]]:
-    matched_rules = []
-    for rule in FOCUSED_BODY_LIBRARY.get(clean_level1, []):
-        matched_count = sum(1 for keyword in rule["keywords"] if keyword in secondary_tag)
-        if matched_count:
-            matched_rules.append((rule.get("priority", 0), matched_count, rule))
-
-    if not matched_rules:
-        return []
-
-    matched_rules.sort(key=lambda item: (item[0], item[1]), reverse=True)
-    best_priority, best_count, _ = matched_rules[0]
-    candidates: list[list[str]] = []
-    for priority, count, rule in matched_rules:
-        if priority == best_priority and count == best_count:
-            candidates.extend(rule.get(mode, []))
-    return candidates
-
-
-def generate_blue_text(level1: str, secondary_tag: str, material: dict | None = None) -> str:
-    clean_level1 = _clean_tag(level1)
-    has_star = "★" in level1
-    cfg = GENERATOR_CONFIG[clean_level1]
-    rng = _rng_for(f"{level1}-blue")
-    if material is None:
-        material = _extract_material_from_secondary(secondary_tag, cfg)
-    if material is None:
-        material = _pick_material(cfg, rng, f"{clean_level1}-blue")
-    names = _pick_names(rng, 4)
-    mapping = {
-        "n1": names[0],
-        "n2": names[1],
-        "n3": names[2],
-        "n4": names[3],
-        "item1": material["items"][0],
-        "item2": material["items"][-1],
-    }
-    mode = "long" if has_star else "short"
-    pattern_key = f"{clean_level1}-{mode}"
-    patterns = BLUE_PATTERNS[clean_level1][mode]
-    text = ""
-    focused_patterns = _focused_body_candidates(clean_level1, secondary_tag, mode)
-    if focused_patterns:
-        focused_key = f"{pattern_key}-focused"
-        pattern = _pick_pattern(focused_patterns, focused_key, rng)
-        text = "".join(sentence.format(**mapping) for sentence in pattern)
-
-    preferred_orders = _pattern_orders_for_secondary(clean_level1, secondary_tag, mode, len(patterns))
-
-    if not text:
-        for pattern_index in preferred_orders:
-            pattern = patterns[pattern_index]
-            candidate = "".join(sentence.format(**mapping) for sentence in pattern)
-            if not _has_significant_overlap(secondary_tag, candidate):
-                text = candidate
-                break
-
-    if not text:
-        for _ in range(len(patterns)):
-            pattern = _pick_pattern(patterns, pattern_key, rng)
-            candidate = "".join(sentence.format(**mapping) for sentence in pattern)
-            if not _has_significant_overlap(secondary_tag, candidate):
-                text = candidate
-                break
-
-    if not text:
-        pattern = patterns[0]
-        text = "".join(sentence.format(**mapping) for sentence in pattern)
-
-    sanitized = _sanitize_blue(text, has_star)
-    if has_star and clean_level1 == "户外自主游戏":
-        care = rng.choice(cfg["response_care"])
-        if not sanitized.endswith("。"):
-            sanitized += "。"
-        sanitized += care
-        if not sanitized.endswith("。"):
-            sanitized += "。"
-    return sanitized
-
-
-def template_ai_generator(level1: str, source_text: str | None = None) -> tuple[str, str]:
-    clean_level1 = _clean_tag(level1)
-    if clean_level1 not in GENERATOR_CONFIG:
-        raise ValueError(f"不支持的一级标签: {level1}")
-
-    fallback_secondary = None
-    fallback_blue = None
-
-    for _ in range(6):
-        secondary, material = generate_secondary_tag(level1)
-        blue = generate_blue_text(level1, secondary, material)
-        if fallback_secondary is None:
-            fallback_secondary = secondary
-            fallback_blue = blue
-        if not _has_significant_overlap(secondary, blue):
-            return secondary, blue
-
-    return fallback_secondary, fallback_blue
 
 
 def _extract_source_hint(source_text: str | None, level1: str) -> str:
@@ -997,32 +306,53 @@ def _mentioned_names(text: str) -> list[str]:
     return [name for name in NAMES if name in text]
 
 
+def _mentioned_forbidden_child_names(text: str) -> list[str]:
+    normalized = text.replace("点点头", "点头")
+    return [name for name in FORBIDDEN_CHILD_NAMES if name in normalized]
+
+
 def _chunked(items: list[dict], size: int) -> list[list[dict]]:
     return [items[index : index + size] for index in range(0, len(items), size)]
 
 
 def _ensure_response_care_text(text: str) -> str:
-    if re.search(r"通过.*(支持|帮助|引导)幼儿", text):
+    if re.search(r"通过.*(支持|帮助|引导)(婴幼儿|幼儿)", text):
         return text
 
-    addition = "通过示范轮流递接，帮助幼儿继续和同伴一起操作。"
+    addition = "通过示范轮流递接，帮助婴幼儿继续和同伴一起操作。"
     if not text.endswith("。"):
         text += "。"
     return text + addition
 
 
-class CodexActivityGenerator:
+def _load_local_env_files() -> None:
+    for filename in (".env.local", ".env"):
+        path = Path(filename)
+        if not path.exists():
+            continue
+
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip("\"'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+
+
+_load_local_env_files()
+
+
+class BaseActivityGenerator:
     def __init__(self) -> None:
-        self.codex_bin = os.getenv("DOCX_CODEX_BIN", "codex")
-        self.codex_model = os.getenv("DOCX_CODEX_MODEL", "").strip()
-        self.batch_size = max(1, int(os.getenv("DOCX_CODEX_BATCH_SIZE", "4")))
-        self.timeout = max(30, int(os.getenv("DOCX_CODEX_TIMEOUT", "360")))
-        self.sandbox = os.getenv("DOCX_CODEX_SANDBOX", "read-only")
-        self.workdir = os.getenv("DOCX_CODEX_WORKDIR", "/tmp")
-        self.reasoning_effort = os.getenv("DOCX_CODEX_REASONING_EFFORT", "high").strip()
+        self.batch_size = max(1, int(os.getenv("DOCX_LLM_BATCH_SIZE", "4")))
+        self.timeout = max(30, int(os.getenv("DOCX_LLM_TIMEOUT", "360")))
         self.include_source_hint = os.getenv("DOCX_INCLUDE_SOURCE_HINT", "1") == "1"
-        self.fallback_mode = os.getenv("DOCX_GENERATION_FALLBACK", "").strip().lower()
-        self._schema_path: str | None = None
+
+    def _rng_suffix(self) -> str:
+        return "llm"
 
     def __call__(self, level1: str, source_text: str | None = None) -> tuple[str, str]:
         return self.batch_generate([{"level1": level1, "source_text": source_text}])[0]
@@ -1042,67 +372,22 @@ class CodexActivityGenerator:
                     try:
                         outputs.extend(self._generate_chunk([request]))
                     except Exception as single_error:
-                        if self.fallback_mode == "template":
-                            outputs.append(
-                                template_ai_generator(
-                                    request["level1"],
-                                    request.get("source_text"),
-                                )
-                            )
-                        else:
-                            raise RuntimeError(
-                                f"{request['level1']} 生成失败：{single_error}；批次错误：{chunk_error}"
-                            ) from single_error
+                        raise RuntimeError(
+                            f"{request['level1']} 生成失败：{single_error}；批次错误：{chunk_error}"
+                        ) from single_error
 
         return outputs
 
-    def _schema_path_for_batch(self) -> str:
-        if self._schema_path:
-            return self._schema_path
-
-        fd, path = tempfile.mkstemp(prefix="docx_replace_schema_", suffix=".json")
-        os.close(fd)
-        Path(path).write_text(
-            json.dumps(BATCH_OUTPUT_SCHEMA, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        self._schema_path = path
-        return path
-
     def _prepare_request(self, index: int, level1: str, source_text: str | None) -> dict:
         clean_level1 = _clean_tag(level1)
-        if clean_level1 not in GENERATOR_CONFIG:
+        if clean_level1 not in MATERIAL_CONFIG:
             raise ValueError(f"不支持的一级标签: {level1}")
 
-        rng = _rng_for(f"{level1}-codex")
-        cfg = GENERATOR_CONFIG[clean_level1]
-        material = _pick_material(cfg, rng, f"{clean_level1}-codex")
+        suffix = self._rng_suffix()
+        rng = _rng_for(f"{level1}-{suffix}")
+        cfg = MATERIAL_CONFIG[clean_level1]
+        material = _pick_material(cfg, rng, f"{clean_level1}-{suffix}")
         allowed_names = _pick_names(rng, 2)
-
-        action_hints = []
-        secondary_cfg = SHORT_SECONDARY_PARTS.get(clean_level1, {})
-        if secondary_cfg.get("actions"):
-            pool = secondary_cfg["actions"][:]
-            rng.shuffle(pool)
-            for action in pool[:4]:
-                action_hints.append(
-                    action.format(
-                        material=material["label"],
-                        item1=material["items"][0],
-                        item2=material["items"][-1],
-                    )
-                )
-        elif secondary_cfg.get("templates"):
-            pool = secondary_cfg["templates"][:]
-            rng.shuffle(pool)
-            for template in pool[:4]:
-                action_hints.append(
-                    template.format(
-                        material=material["label"],
-                        item1=material["items"][0],
-                        item2=material["items"][-1],
-                    )
-                )
 
         needs_response_care = "★" in level1 and clean_level1 == "户外自主游戏"
         blue_range = "90-120字" if "★" in level1 else "30-45字"
@@ -1119,7 +404,6 @@ class CodexActivityGenerator:
             "blue_char_range": blue_range,
             "allowed_names": allowed_names,
             "material": material,
-            "goal_hints": action_hints,
             "needs_response_care": needs_response_care,
             "source_hint": _extract_source_hint(source_text, level1)
             if self.include_source_hint
@@ -1127,6 +411,130 @@ class CodexActivityGenerator:
             "avoid_recent_secondary": RECENT_LLM_SECONDARIES[clean_level1][-3:],
             "avoid_recent_blue": RECENT_LLM_BLUE_SNIPPETS[clean_level1][-2:],
         }
+
+    def _normalize_payload(self, chunk: list[dict], payload: dict, provider_name: str) -> list[tuple[str, str]]:
+        items = payload.get("items")
+        if not isinstance(items, list):
+            raise ValueError(f"{provider_name} 输出缺少 items: {json.dumps(payload, ensure_ascii=False)[:200]}")
+        if len(items) != len(chunk):
+            raise ValueError(f"{provider_name} 输出数量不匹配：期望 {len(chunk)}，实际 {len(items)}")
+
+        normalized = []
+        items_by_index = {item["index"]: item for item in items}
+        for request in chunk:
+            item = items_by_index.get(request["index"])
+            if item is None:
+                raise ValueError(f"{provider_name} 输出缺少 index={request['index']} 的结果")
+            secondary, blue = self._normalize_result(request, item)
+            normalized.append((secondary, blue))
+            RECENT_LLM_SECONDARIES[request["clean_level1"]].append(secondary)
+            RECENT_LLM_SECONDARIES[request["clean_level1"]] = RECENT_LLM_SECONDARIES[
+                request["clean_level1"]
+            ][-6:]
+            RECENT_LLM_BLUE_SNIPPETS[request["clean_level1"]].append(blue[:40])
+            RECENT_LLM_BLUE_SNIPPETS[request["clean_level1"]] = RECENT_LLM_BLUE_SNIPPETS[
+                request["clean_level1"]
+            ][-4:]
+        return normalized
+
+    def _normalize_result(self, request: dict, item: dict) -> tuple[str, str]:
+        secondary = self._sanitize_secondary_text(str(item.get("secondary", "")), request)
+        blue = self._sanitize_blue_text(str(item.get("blue", "")), request)
+
+        secondary = re.sub(rf"^{re.escape(request['clean_level1'])}[:：]", "", secondary)
+        secondary = secondary.strip("“”\"' ")
+        blue = blue.strip("“”\"' ")
+        if request["needs_response_care"]:
+            blue = _ensure_response_care_text(blue)
+        if not blue.endswith("。"):
+            blue += "。"
+
+        self._validate_result(request, secondary, blue)
+        return secondary, blue
+
+    def _sanitize_secondary_text(self, text: str, request: dict) -> str:
+        return _sanitize_secondary(text)
+
+    def _sanitize_blue_text(self, text: str, request: dict) -> str:
+        return _sanitize_blue(text, request["starred"])
+
+    def _secondary_length_bounds(self, request: dict) -> tuple[int, int]:
+        return 7, 18
+
+    def _blue_length_bounds(self, request: dict) -> tuple[int, int]:
+        min_blue_len = 24 if not request["starred"] else 72
+        max_blue_len = 70 if not request["starred"] else 145
+        if request["needs_response_care"]:
+            min_blue_len = 96
+            max_blue_len = 190
+        return min_blue_len, max_blue_len
+
+    def _validate_result(self, request: dict, secondary: str, blue: str) -> None:
+        min_secondary_len, max_secondary_len = self._secondary_length_bounds(request)
+        if not secondary or len(secondary) < min_secondary_len or len(secondary) > max_secondary_len:
+            raise ValueError(f"小目标长度异常: {secondary}")
+        if "。" in secondary or "\n" in secondary:
+            raise ValueError(f"小目标格式异常: {secondary}")
+        if not blue or "\n" in blue:
+            raise ValueError("正文为空或包含换行")
+        if not any(word in blue for word in ACTION_WORDS):
+            raise ValueError(f"正文缺少动作感: {blue}")
+        if _has_significant_overlap(secondary, blue):
+            raise ValueError(f"小目标和正文重复度过高: {secondary} / {blue}")
+
+        forbidden_names = _mentioned_forbidden_child_names(f"{secondary}。{blue}")
+        if forbidden_names:
+            raise ValueError(f"输出包含旧名字池名字: {forbidden_names}")
+
+        mentioned = _mentioned_names(blue)
+        mentioned_unique = list(dict.fromkeys(mentioned))
+        if not mentioned_unique:
+            raise ValueError(f"正文缺少幼儿名字: {blue}")
+        if len(mentioned_unique) > 2:
+            raise ValueError(f"正文出现超过 2 个名字: {blue}")
+        if any(name not in request["allowed_names"] for name in mentioned_unique):
+            raise ValueError(
+                f"正文使用了未授权名字: {mentioned_unique}，允许={request['allowed_names']}"
+            )
+
+        min_blue_len, max_blue_len = self._blue_length_bounds(request)
+        if len(blue) < min_blue_len or len(blue) > max_blue_len:
+            raise ValueError(f"正文长度异常({len(blue)}): {blue}")
+
+        if request["needs_response_care"] and not re.search(r"通过.*(支持|帮助|引导)(婴幼儿|幼儿)", blue):
+            raise ValueError(f"户外自主游戏缺少回应性照护: {blue}")
+
+    def _generate_chunk(self, chunk: list[dict]) -> list[tuple[str, str]]:
+        raise NotImplementedError
+
+
+class CodexActivityGenerator(BaseActivityGenerator):
+    def __init__(self) -> None:
+        super().__init__()
+        self.codex_bin = os.getenv("DOCX_CODEX_BIN", "codex")
+        self.codex_model = os.getenv("DOCX_CODEX_MODEL", "").strip()
+        self.batch_size = max(1, int(os.getenv("DOCX_CODEX_BATCH_SIZE", str(self.batch_size))))
+        self.timeout = max(30, int(os.getenv("DOCX_CODEX_TIMEOUT", str(self.timeout))))
+        self.sandbox = os.getenv("DOCX_CODEX_SANDBOX", "read-only")
+        self.workdir = os.getenv("DOCX_CODEX_WORKDIR", "/tmp")
+        self.reasoning_effort = os.getenv("DOCX_CODEX_REASONING_EFFORT", "high").strip()
+        self._schema_path: str | None = None
+
+    def _rng_suffix(self) -> str:
+        return "codex"
+
+    def _schema_path_for_batch(self) -> str:
+        if self._schema_path:
+            return self._schema_path
+
+        fd, path = tempfile.mkstemp(prefix="docx_replace_schema_", suffix=".json")
+        os.close(fd)
+        Path(path).write_text(
+            json.dumps(BATCH_OUTPUT_SCHEMA, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        self._schema_path = path
+        return path
 
     def _generate_chunk(self, chunk: list[dict]) -> list[tuple[str, str]]:
         prompt = f"{LOGICAL_FLOW_SYSTEM_PROMPT}\n\n{build_batch_user_prompt(chunk)}"
@@ -1174,76 +582,185 @@ class CodexActivityGenerator:
 
         raw_output = Path(output_path).read_text(encoding="utf-8").strip()
         payload = json.loads(raw_output)
-        items = payload.get("items")
-        if not isinstance(items, list):
-            raise ValueError(f"Codex 输出缺少 items: {raw_output[:200]}")
-        if len(items) != len(chunk):
-            raise ValueError(f"Codex 输出数量不匹配：期望 {len(chunk)}，实际 {len(items)}")
+        return self._normalize_payload(chunk, payload, "Codex")
 
-        normalized = []
-        items_by_index = {item["index"]: item for item in items}
-        for request in chunk:
-            item = items_by_index.get(request["index"])
-            if item is None:
-                raise ValueError(f"Codex 输出缺少 index={request['index']} 的结果")
-            secondary, blue = self._normalize_result(request, item)
-            normalized.append((secondary, blue))
-            RECENT_LLM_SECONDARIES[request["clean_level1"]].append(secondary)
-            RECENT_LLM_SECONDARIES[request["clean_level1"]] = RECENT_LLM_SECONDARIES[
-                request["clean_level1"]
-            ][-6:]
-            RECENT_LLM_BLUE_SNIPPETS[request["clean_level1"]].append(blue[:40])
-            RECENT_LLM_BLUE_SNIPPETS[request["clean_level1"]] = RECENT_LLM_BLUE_SNIPPETS[
-                request["clean_level1"]
-            ][-4:]
-        return normalized
 
-    def _normalize_result(self, request: dict, item: dict) -> tuple[str, str]:
-        secondary = _sanitize_secondary(str(item.get("secondary", "")))
-        blue = _sanitize_blue(str(item.get("blue", "")), request["starred"])
+class ArkActivityGenerator(BaseActivityGenerator):
+    BAD_SECONDARY_PHRASES = ("重点观察", "观察记录", "生活观察", "教学")
+    BAD_BLUE_PHRASES = (
+        "再按顺序做下一步",
+        "再继续完成接下来的动作",
+        "再听提示做后面的动作",
+        "把东西放好后",
+        "转过身后",
+    )
 
-        secondary = re.sub(rf"^{re.escape(request['clean_level1'])}[:：]", "", secondary)
-        secondary = secondary.strip("“”\"' ")
-        blue = blue.strip("“”\"' ")
+    def __init__(self) -> None:
+        super().__init__()
+        self.api_key = os.getenv("DOCX_ARK_API_KEY") or os.getenv("ARK_API_KEY", "")
+        self.base_url = os.getenv("DOCX_ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3").rstrip("/")
+        self.model = os.getenv("DOCX_ARK_MODEL", "doubao-seed-2-0-lite-260215").strip()
+        self.reasoning_effort = os.getenv("DOCX_ARK_REASONING_EFFORT", "medium").strip()
+        self.batch_size = max(1, int(os.getenv("DOCX_ARK_BATCH_SIZE", str(self.batch_size))))
+        self.timeout = max(30, int(os.getenv("DOCX_ARK_TIMEOUT", str(self.timeout))))
+
+    def _rng_suffix(self) -> str:
+        return "ark"
+
+    def _sanitize_secondary_text(self, text: str, request: dict) -> str:
+        text = re.sub(r"\s+", "", text)
+        text = text.lstrip("：:").rstrip("。.")
+        text = re.sub(rf"^{re.escape(request['clean_level1'])}[:：]", "", text)
+        if "：" in text or ":" in text:
+            text = re.split(r"[:：]", text, 1)[0]
+        return text.strip("“”\"' ")
+
+    def _sanitize_blue_text(self, text: str, request: dict) -> str:
+        text = text.replace("\n", "").replace("\r", "").strip()
+        text = re.sub(r"[。]{2,}", "。", text)
+        if not text.endswith("。"):
+            text += "。"
+        return text
+
+    def _secondary_length_bounds(self, request: dict) -> tuple[int, int]:
+        return 4, 30
+
+    def _blue_length_bounds(self, request: dict) -> tuple[int, int]:
         if request["needs_response_care"]:
-            blue = _ensure_response_care_text(blue)
-        if not blue.endswith("。"):
-            blue += "。"
-
-        self._validate_result(request, secondary, blue)
-        return secondary, blue
+            return 55, 300
+        if request["starred"]:
+            return 45, 260
+        return 18, 180
 
     def _validate_result(self, request: dict, secondary: str, blue: str) -> None:
-        if not secondary or len(secondary) < 7 or len(secondary) > 18:
-            raise ValueError(f"小目标长度异常: {secondary}")
-        if "。" in secondary or "\n" in secondary:
-            raise ValueError(f"小目标格式异常: {secondary}")
-        if not blue or "\n" in blue:
-            raise ValueError("正文为空或包含换行")
-        if not any(word in blue for word in ACTION_WORDS):
-            raise ValueError(f"正文缺少动作感: {blue}")
-        if _has_significant_overlap(secondary, blue):
-            raise ValueError(f"小目标和正文重复度过高: {secondary} / {blue}")
+        if any(phrase in secondary for phrase in self.BAD_SECONDARY_PHRASES):
+            raise ValueError(f"豆包小目标过于模板化: {secondary}")
+        if any(phrase in blue for phrase in self.BAD_BLUE_PHRASES):
+            raise ValueError(f"豆包正文出现模板动作链: {blue}")
+        super()._validate_result(request, secondary, blue)
 
-        mentioned = _mentioned_names(blue)
-        mentioned_unique = list(dict.fromkeys(mentioned))
-        if len(mentioned_unique) > 2:
-            raise ValueError(f"正文出现超过 2 个名字: {blue}")
-        if any(name not in request["allowed_names"] for name in mentioned_unique):
-            raise ValueError(
-                f"正文使用了未授权名字: {mentioned_unique}，允许={request['allowed_names']}"
+    def _generate_chunk(self, chunk: list[dict]) -> list[tuple[str, str]]:
+        if not self.api_key:
+            raise RuntimeError("未配置豆包 API Key，请设置 DOCX_ARK_API_KEY 或 ARK_API_KEY")
+
+        prompt = build_doubao_batch_user_prompt(chunk)
+        payload = self._request_completion(prompt)
+        return self._normalize_payload(chunk, payload, "豆包")
+
+    def _request_completion(self, prompt: str) -> dict:
+        body = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": DOUBAO_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+        }
+        if self.reasoning_effort:
+            body["reasoning_effort"] = self.reasoning_effort
+
+        request_body = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        req = urllib_request.Request(
+            f"{self.base_url}/chat/completions",
+            data=request_body,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+            },
+            method="POST",
+        )
+        try:
+            with urllib_request.urlopen(req, timeout=self.timeout) as response:
+                raw_body = response.read().decode("utf-8")
+        except error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="ignore")
+            raise RuntimeError(f"豆包请求失败，status={exc.code}，body={detail[-400:]}") from exc
+        except error.URLError as exc:
+            raise RuntimeError(f"豆包请求失败：{exc.reason}") from exc
+
+        try:
+            response_payload = json.loads(raw_body)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"豆包返回非 JSON：{raw_body[:200]}") from exc
+
+        content = self._extract_message_content(response_payload)
+        return self._parse_model_json(content)
+
+    def _extract_message_content(self, response_payload: dict) -> str:
+        choices = response_payload.get("choices")
+        if not isinstance(choices, list) or not choices:
+            raise ValueError(f"豆包返回缺少 choices: {json.dumps(response_payload, ensure_ascii=False)[:200]}")
+
+        message = choices[0].get("message") or {}
+        content = message.get("content")
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, dict) and "text" in item:
+                    parts.append(str(item.get("text", "")))
+            text = "".join(parts).strip()
+            if text:
+                return text
+
+        raise ValueError(f"豆包返回缺少文本 content: {json.dumps(message, ensure_ascii=False)[:200]}")
+
+    def _parse_model_json(self, content: str) -> dict:
+        stripped = content.strip()
+        if stripped.startswith("```"):
+            stripped = re.sub(r"^```json\s*", "", stripped)
+            stripped = re.sub(r"^```\s*", "", stripped)
+            stripped = re.sub(r"\s*```$", "", stripped)
+            stripped = stripped.strip()
+        try:
+            return json.loads(stripped)
+        except json.JSONDecodeError as exc:
+            start = stripped.find("{")
+            end = stripped.rfind("}")
+            if start != -1 and end != -1 and start < end:
+                try:
+                    return json.loads(stripped[start : end + 1])
+                except json.JSONDecodeError:
+                    pass
+            raise ValueError(f"豆包输出不是合法 JSON：{content[:200]}") from exc
+
+
+class FallbackActivityGenerator:
+    def __init__(self, primary, fallback, primary_name: str, fallback_name: str) -> None:
+        self.primary = primary
+        self.fallback = fallback
+        self.primary_name = primary_name
+        self.fallback_name = fallback_name
+
+    def __call__(self, level1: str, source_text: str | None = None) -> tuple[str, str]:
+        return self.batch_generate([{"level1": level1, "source_text": source_text}])[0]
+
+    def batch_generate(self, requests: list[dict]) -> list[tuple[str, str]]:
+        try:
+            return self.primary.batch_generate(requests)
+        except Exception as primary_error:
+            print(
+                f"{self.primary_name} 调用失败，自动回退到 {self.fallback_name}：{primary_error}"
             )
-
-        min_blue_len = 24 if not request["starred"] else 72
-        max_blue_len = 70 if not request["starred"] else 145
-        if request["needs_response_care"]:
-            min_blue_len = 96
-            max_blue_len = 190
-        if len(blue) < min_blue_len or len(blue) > max_blue_len:
-            raise ValueError(f"正文长度异常({len(blue)}): {blue}")
-
-        if request["needs_response_care"] and not re.search(r"通过.*(支持|帮助|引导)幼儿", blue):
-            raise ValueError(f"户外自主游戏缺少回应性照护: {blue}")
+            return self.fallback.batch_generate(requests)
 
 
-ai_generator = CodexActivityGenerator()
+def _create_generator(provider: str):
+    if provider == "codex":
+        return CodexActivityGenerator()
+    if provider == "ark":
+        return ArkActivityGenerator()
+    raise ValueError(f"不支持的 LLM provider: {provider}")
+
+
+def build_ai_generator():
+    provider = os.getenv("DOCX_LLM_PROVIDER", "ark").strip().lower()
+    fallback_provider = os.getenv("DOCX_LLM_FALLBACK_PROVIDER", "").strip().lower()
+    generator = _create_generator(provider)
+    if fallback_provider and fallback_provider != provider:
+        fallback_generator = _create_generator(fallback_provider)
+        return FallbackActivityGenerator(generator, fallback_generator, provider, fallback_provider)
+    return generator
+
+
+ai_generator = build_ai_generator()

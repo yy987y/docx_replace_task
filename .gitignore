@@ -1,3 +1,7 @@
 # Ignore Word documents
 *.doc
 *.docx
+.env
+.env.local
+__pycache__/
+*.py[cod]

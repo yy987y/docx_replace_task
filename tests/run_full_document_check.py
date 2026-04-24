@@ -12,7 +12,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from ai_generator import GENERATOR_CONFIG, TAG_ALIASES, ai_generator
+from ai_generator import MATERIAL_CONFIG, TAG_ALIASES, ai_generator
 from replace_word import KNOWN_LEVEL1_TAGS, is_level1_para, process_document
 from spire.doc import Document
 
@@ -21,7 +21,7 @@ KNOWN_TAGS = KNOWN_LEVEL1_TAGS[:]
 KNOWN_ITEMS = sorted(
     {
         item
-        for tag_config in GENERATOR_CONFIG.values()
+        for tag_config in MATERIAL_CONFIG.values()
         for material in tag_config["materials"]
         for item in material["items"]
     },
